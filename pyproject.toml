@@ -1,0 +1,10 @@
+[build-system]
+requires = ["scikit-build-core>=0.5", "pybind11"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "curaster"
+version = "0.1.0"
+description = "CUDA-accelerated Raster Algebra Calculator"
+readme = "README.md"
+requires-python = ">=3.8"

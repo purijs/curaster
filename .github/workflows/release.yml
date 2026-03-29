@@ -1,0 +1,36 @@
+name: Build and Publish Release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-wheels:
+    runs-on: ubuntu-latest
+    container: nvidia/cuda:12.2.2-devel-ubuntu22.04 
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install System Dependencies (GDAL, Python, Build Tools)
+        run: |
+          apt-get update
+          apt-get install -y python3-dev python3-pip gdal-bin libgdal-dev cmake git
+          
+      - name: Install Python Build Dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install build auditwheel pybind11 scikit-build-core
+
+      - name: Build Python Wheel
+        run: python3 -m build --wheel
+
+      - name: Bundle GDAL into the Wheel (Auditwheel)
+        run: |
+          auditwheel repair dist/*.whl --plat manylinux_2_35_x86_64 -w wheelhouse/
+
+      - name: Upload Release Asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-wheel
+          path: wheelhouse/*.whl
