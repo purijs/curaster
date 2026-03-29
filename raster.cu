@@ -21,7 +21,7 @@ int main() {
     GDALRasterBand* band_red = rasterfile->GetRasterBand(1);
     GDALRasterBand* band_nir = rasterfile->GetRasterBand(4);
 
-    int blockXSize = 34350, blockYSize = 32755;
+    int blockXSize = band_red->GetXSize(), blockYSize = band_red->GetYSize();
     std::vector<float>* buffer_red_pixels = new std::vector<float>(blockXSize * blockYSize);
     std::vector<float>* buffer_nir_pixels = new std::vector<float>(blockXSize * blockYSize);
 
