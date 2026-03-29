@@ -39,3 +39,7 @@
 
 # debug information files
 *.dwo
+
+# Media files
+*.tif
+*.tiff

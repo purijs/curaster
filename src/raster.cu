@@ -108,8 +108,6 @@ void curaster(std::string& input_file, std::string& output_file, int& red_band_i
     
     delete buffer_ndvi_pixels;
     GDALClose(rasterfile);
-
-    return 0;
 }
 
 PYBIND11_MODULE(curaster, m) {
