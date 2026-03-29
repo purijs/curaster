@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <bits/stdc++.h>
+#include <pybind11/pybind11.h>
 
 __global__ void compute_ndvi(const float* red_band, const float* nir_band, float* ndvi_band, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -14,12 +15,12 @@ __global__ void compute_ndvi(const float* red_band, const float* nir_band, float
     }
 }
 
-int main() {
+void curaster(std::string& input_file, std::string& output_file, int& red_band_index, int& nir_band_index) {
     GDALAllRegister();
-    GDALDataset* rasterfile = (GDALDataset*)GDALOpen("../gis/data/final_merged_mosaic.tif", GA_ReadOnly);
+    GDALDataset* rasterfile = (GDALDataset*)GDALOpen(input_file.c_str(), GA_ReadOnly);
 
-    GDALRasterBand* band_red = rasterfile->GetRasterBand(1);
-    GDALRasterBand* band_nir = rasterfile->GetRasterBand(4);
+    GDALRasterBand* band_red = rasterfile->GetRasterBand(red_band_index);
+    GDALRasterBand* band_nir = rasterfile->GetRasterBand(nir_band_index);
 
     int blockXSize = band_red->GetXSize(), blockYSize = band_red->GetYSize();
     std::vector<float>* buffer_red_pixels = new std::vector<float>(blockXSize * blockYSize);
@@ -80,7 +81,7 @@ int main() {
 
     GDALDriver* gtiffDriver = GetGDALDriverManager()->GetDriverByName("GTiff");
     GDALDataset* outRaster = gtiffDriver->Create(
-        "ndvi_output.tif",
+        output_file.c_str(),
         blockXSize,
         blockYSize,
         1,
@@ -109,4 +110,13 @@ int main() {
     GDALClose(rasterfile);
 
     return 0;
+}
+
+PYBIND11_MODULE(curaster, m) {
+    m.def("ndvi", &curaster, "A function that computes NDVI from a raster file and saves the output.",
+        pybind11::arg("input_file"),
+        pybind11::arg("output_file"),
+        pybind11::arg("red_band_index"),
+        pybind11::arg("nir_band_index")
+    );
 }
