@@ -25,6 +25,8 @@ jobs:
           fetch-tags: true
 
       - name: Install System Dependencies & Deadsnakes
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           apt-get update
           apt-get install -y software-properties-common gdal-bin libgdal-dev cmake git build-essential patchelf
