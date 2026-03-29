@@ -5,35 +5,84 @@ on:
   push:
     branches:
       - feat/release-workflow
+  
+  release:
+    types: [published]
 
 jobs:
   build-wheels:
     runs-on: ubuntu-latest
     container: nvidia/cuda:12.2.2-devel-ubuntu22.04 
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
-      - name: Install System Dependencies (GDAL, Python, Build Tools)
+      - name: Install System Dependencies & Deadsnakes
         run: |
           apt-get update
-          apt-get install -y python3-dev python3-pip gdal-bin libgdal-dev cmake git build-essential patchelf
+          apt-get install -y software-properties-common gdal-bin libgdal-dev cmake git build-essential patchelf
           
-      - name: Install Python Build Dependencies
+          add-apt-repository ppa:deadsnakes/ppa -y
+          apt-get update
+          
+          apt-get install -y python${{ matrix.python-version }} python${{ matrix.python-version }}-dev python${{ matrix.python-version }}-venv
+
+      - name: Create Virtual Environment and Install Build Deps
         run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install build auditwheel pybind11 scikit-build-core
+          python${{ matrix.python-version }} -m venv /venv
+          . /venv/bin/activate
+          
+          python -m pip install --upgrade pip
+          python -m pip install build auditwheel pybind11 scikit-build-core
 
       - name: Build Python Wheel
-        run: python3 -m build --wheel
-
-      - name: Bundle GDAL into the Wheel (Auditwheel)
         run: |
+          . /venv/bin/activate
+          python -m build --wheel
+
+      - name: Bundle GDAL into the Wheel
+        run: |
+          . /venv/bin/activate
           auditwheel repair dist/*.whl --plat manylinux_2_35_x86_64 -w wheelhouse/
 
-      - name: Upload Release Asset
+      - name: Smoke Test the Wheel
+        run: |
+          . /venv/bin/activate
+          pip install wheelhouse/*.whl
+          python -c "import curaster; print('Smoke test passed!')"
+
+      - name: Upload Wheel as Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: compiled-wheel
+          name: curaster-wheel-${{ matrix.python-version }}
           path: wheelhouse/*.whl
+
+  publish-to-pypi:
+    name: Publish to PyPI
+    needs: build-wheels
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-latest
+    
+    permissions:
+      id-token: write
+      contents: read
+      
+    steps:
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: curaster-wheel-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish package to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
