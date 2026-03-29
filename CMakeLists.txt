@@ -9,5 +9,5 @@ find_package(GDAL REQUIRED)
 set(CMAKE_CUDA_RUNTIME_LIBRARY Static)
 set(CMAKE_CUDA_ARCHITECTURES "75;80;86;89;90")
 
-pybind11_add_module(curaster MODULE raster_opt.cu)
+pybind11_add_module(curaster MODULE src/raster.cu)
 target_link_libraries(curaster PRIVATE GDAL::GDAL)
