@@ -18,15 +18,6 @@ jobs:
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          fetch-tags: true
-
-      - name: Fix Git Permissions for setuptools_scm
-        run: git config --global --add safe.directory '*'
-        
       - name: Install System Dependencies & Deadsnakes
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -38,6 +29,15 @@ jobs:
           apt-get update
           
           apt-get install -y python${{ matrix.python-version }} python${{ matrix.python-version }}-dev python${{ matrix.python-version }}-venv
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Fix Git Permissions for setuptools_scm
+        run: git config --global --add safe.directory '*'
 
       - name: Create Virtual Environment and Install Build Deps
         run: |
