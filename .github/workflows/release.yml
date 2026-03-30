@@ -24,6 +24,9 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
+      - name: Fix Git Permissions for setuptools_scm
+        run: git config --global --add safe.directory '*'
+        
       - name: Install System Dependencies & Deadsnakes
         env:
           DEBIAN_FRONTEND: noninteractive
