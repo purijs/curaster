@@ -43,3 +43,5 @@
 # Media files
 *.tif
 *.tiff
+
+build/
