@@ -5,7 +5,7 @@
 #include <vector>
 #include <cstdio>
 #include <cstdlib>
-#include <bits/stdc++.h>
+#include <string>
 #include <pybind11/pybind11.h>
 #include "cpl_progress.h"
 
