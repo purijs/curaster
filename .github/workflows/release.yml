@@ -101,8 +101,8 @@ jobs:
       - name: Install Build Dependencies and GDAL
         shell: pwsh
         run: |
-          conda install -y -c conda-forge gdal build delvewheel
-          python -m pip install pybind11 scikit-build-core setuptools_scm
+          conda install -y -c conda-forge gdal delvewheel
+          python -m pip install build pybind11 scikit-build-core setuptools_scm
 
       - name: Build Python Wheel
         shell: pwsh
