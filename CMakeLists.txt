@@ -13,3 +13,6 @@ pybind11_add_module(curaster MODULE src/raster.cu)
 target_link_libraries(curaster PRIVATE GDAL::GDAL)
 
 install(TARGETS curaster DESTINATION .)
+
+install(DIRECTORY /usr/share/proj/ DESTINATION proj_data)
+install(DIRECTORY /usr/share/gdal/ DESTINATION gdal_data)
