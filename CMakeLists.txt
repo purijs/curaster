@@ -10,9 +10,17 @@ set(CMAKE_CUDA_RUNTIME_LIBRARY Static)
 set(CMAKE_CUDA_ARCHITECTURES "75;80;86;89;90")
 
 pybind11_add_module(curaster MODULE src/raster.cu)
+
 target_link_libraries(curaster PRIVATE GDAL::GDAL)
 
 install(TARGETS curaster DESTINATION .)
 
-install(DIRECTORY /usr/share/proj/ DESTINATION proj_data)
-install(DIRECTORY /usr/share/gdal/ DESTINATION gdal_data)
+if(UNIX)
+    # Ubuntu Docker paths
+    install(DIRECTORY /usr/share/proj/ DESTINATION proj_data)
+    install(DIRECTORY /usr/share/gdal/ DESTINATION gdal_data)
+elseif(WIN32)
+    # Windows Conda paths
+    install(DIRECTORY $ENV{CONDA_PREFIX}/Library/share/proj/ DESTINATION proj_data)
+    install(DIRECTORY $ENV{CONDA_PREFIX}/Library/share/gdal/ DESTINATION gdal_data)
+endif()
