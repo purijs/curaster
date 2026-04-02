@@ -102,7 +102,7 @@ jobs:
         shell: pwsh
         run: |
           conda install -y -c conda-forge gdal delvewheel
-          python -m pip install build pybind11 scikit-build-core setuptools_scm
+          python -m pip install build pybind11 scikit-build-core setuptools_scm ninja
 
       - name: Build Python Wheel
         shell: pwsh
