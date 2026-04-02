@@ -88,7 +88,7 @@ jobs:
       - name: Setup CUDA Toolkit
         uses: Jimver/cuda-toolkit@v0.2.17
         with:
-          cuda: '12.2.2'
+          cuda: '12.4.1'
 
       - name: Setup Conda Environment (For GDAL)
         uses: conda-incubator/setup-miniconda@v3
