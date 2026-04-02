@@ -106,7 +106,10 @@ jobs:
 
       - name: Build Python Wheel
         shell: pwsh
-        run: python -m build --wheel
+        run: |
+          $env:CMAKE_GENERATOR = "Ninja"
+          $env:CMAKE_PREFIX_PATH = "$env:CONDA_PREFIX\Library"
+          python -m build --wheel
 
       - name: Bundle GDAL into the Wheel (Delvewheel)
         shell: pwsh
