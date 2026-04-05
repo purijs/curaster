@@ -5,7 +5,7 @@
 #include <vector>
 #include <cstdio>
 #include <cstdlib>
-#include <bits/stdc++.h>
+#include <string>
 #include <pybind11/pybind11.h>
 #include "cpl_progress.h"
 
@@ -117,7 +117,37 @@ void curaster(std::string& input_file, std::string& output_file, int& red_band_i
 }
 
 PYBIND11_MODULE(curaster, m) {
-    m.def("ndvi", &curaster, "A function that computes NDVI from a raster file and saves the output.",
+
+    m.doc() = "CUDA-accelerated Raster Algebra Calculator.";
+
+    pybind11::module_ os = pybind11::module_::import("os");
+    std::string module_dir = os.attr("path").attr("dirname")(m.attr("__file__")).cast<std::string>();
+    
+    std::string proj_path = module_dir + "/proj_data";
+    std::string gdal_path = module_dir + "/gdal_data";
+    
+    os.attr("environ")["PROJ_LIB"] = proj_path;
+    os.attr("environ")["PROJ_DATA"] = proj_path;
+    os.attr("environ")["GDAL_DATA"] = gdal_path;
+
+    CPLSetConfigOption("PROJ_LIB", proj_path.c_str());
+    CPLSetConfigOption("PROJ_DATA", proj_path.c_str());
+    CPLSetConfigOption("GDAL_DATA", gdal_path.c_str());
+
+    m.def("ndvi", &curaster, R"pbdoc(
+Computes the Normalized Difference Vegetation Index (NDVI) from a raster file.
+
+This function reads the specified red and near-infrared (NIR) bands from the input
+raster, processes the NDVI on the GPU, and writes the results directly to disk.
+
+Args:
+    input_file (str): Path to the input GeoTIFF file.
+    output_file (str): Path where the resulting NDVI GeoTIFF will be saved.
+    red_band_index (int): The index of the Red band.
+    nir_band_index (int): The index of the Near-Infrared band.
+    chunk_size (int, optional): The height of the chunk to process in memory at once. Defaults to 256.
+    verbose (bool, optional): If True, displays a progress bar. Defaults to True.
+)pbdoc",
         pybind11::arg("input_file"),
         pybind11::arg("output_file"),
         pybind11::arg("red_band_index"),

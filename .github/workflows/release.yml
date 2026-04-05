@@ -5,7 +5,6 @@ on:
   push:
     branches:
       - feat/release-workflow
-  
   release:
     types: [published]
 
@@ -66,12 +65,72 @@ jobs:
       - name: Upload Wheel as Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: curaster-wheel-${{ matrix.python-version }}
+          name: curaster-wheel-linux-${{ matrix.python-version }}
           path: wheelhouse/*.whl
+
+  build-wheels-windows:
+    name: Build Windows Wheels
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Setup MSVC Compiler
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Setup CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.17
+        with:
+          cuda: '12.4.1'
+
+      - name: Setup Conda Environment (For GDAL)
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          python-version: ${{ matrix.python-version }}
+          activate-environment: curaster-build
+          auto-activate-base: false
+
+      - name: Install Build Dependencies and GDAL
+        shell: pwsh
+        run: |
+          conda install -y -c conda-forge gdal delvewheel
+          python -m pip install build pybind11 scikit-build-core setuptools_scm ninja
+
+      - name: Build Python Wheel
+        shell: pwsh
+        run: |
+          $env:CMAKE_GENERATOR = "Ninja"
+          $env:CMAKE_PREFIX_PATH = "$env:CONDA_PREFIX\Library"
+          python -m build --wheel
+
+      - name: Bundle GDAL into the Wheel (Delvewheel)
+        shell: pwsh
+        run: |
+          delvewheel repair dist/*.whl -w wheelhouse/ --add-path "$env:CONDA_PREFIX\Library\bin"
+
+      - name: Smoke Test the Wheel
+        shell: pwsh
+        run: |
+          pip install (Get-ChildItem wheelhouse\*.whl)[0].FullName
+          python -c "import curaster; print('Windows smoke test passed!')"
+
+      - name: Upload Wheel as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: curaster-wheel-windows-${{ matrix.python-version }}
+          path: wheelhouse\*.whl
 
   publish-to-pypi:
     name: Publish to PyPI
-    needs: build-wheels
+    needs: [build-wheels, build-wheels-windows] 
     if: github.event_name == 'release' && github.event.action == 'published'
     runs-on: ubuntu-latest
     
