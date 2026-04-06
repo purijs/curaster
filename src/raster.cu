@@ -10,7 +10,10 @@
 #include <atomic> 
 #include "gdal_priv.h"
 #include "cpl_string.h"
+#include "cpl_progress.h"
 #include <fstream>
+#include <pybind11/pybind11.h>
+
 #define cudaCheck(ans) { gpuAssert((ans), __FILE__, __LINE__); }
 
 const int num_threads = std::thread::hardware_concurrency() - 1;
@@ -87,7 +90,7 @@ struct Token {
 };
 
 struct ThreadBuffers {
-    float* h_master_block = nullptr; // Single contiguous block for GDAL PIXEL scatter-read
+    float* h_master_block = nullptr; 
     std::vector<float*> host_bands_ptrs;
     std::vector<float*> device_bands_ptrs;
     float* h_output_ptr = nullptr;
@@ -99,12 +102,10 @@ struct ThreadBuffers {
         host_bands_ptrs.resize(num_bands);
         device_bands_ptrs.resize(num_bands);
 
-        // Allocate ONE massive contiguous block of Pinned RAM
         cudaCheck(cudaHostAlloc(&h_master_block, max_bytes_per_band * num_bands, cudaHostAllocMapped | cudaHostAllocWriteCombined));
         memset(h_master_block, 0, max_bytes_per_band * num_bands);
 
         for (int i = 0; i < num_bands; i++) {
-            // Chop the master block into individual band pointers
             float* h_ptr = h_master_block + (i * (max_bytes_per_band / sizeof(float)));
             float* d_ptr;
             cudaCheck(cudaHostGetDevicePointer((void**)&d_ptr, h_ptr, 0));
@@ -236,13 +237,6 @@ std::vector<Instruction> program(const std::vector<Token>& output_queue, const s
     return instructions;
 }
 
-void get_input(int argc, char* argv[], file_info& f) {
-    if (argc != 4) { std::cerr << "Usage: ./raster <in> <out> <expr>\n"; exit(1); }
-    f.input_file = argv[1];
-    f.output_file = argv[2];
-    f.raster_algebric_instructions = program(parse(std::string(argv[3]), f.band_indices), f.band_indices);
-}
-
 void set_metadata(file_info& f) {
     GDALAllRegister();
     GDALDataset* ds = (GDALDataset*)GDALOpen(f.input_file, GA_ReadOnly);
@@ -264,102 +258,172 @@ void set_metadata(file_info& f) {
     GDALClose(ds);
 }
 
-void curaster(std::string& input_file, std::string& output_file, int& red_band_index, int& nir_band_index, int& chunk_size, bool& verbose) {
+void compute_algebra(const std::string& input_file, const std::string& output_file, const std::string& expression, bool verbose) {
+    file_info f;
+    f.input_file = input_file.c_str();
+    f.output_file = output_file.c_str();
+    f.raster_algebric_instructions = program(parse(expression, f.band_indices), f.band_indices);
+    
+    set_metadata(f); 
+    
+    size_t available_ram_bytes = get_available_ram();
+    size_t total_allowed_ram = (size_t)(available_ram_bytes * 0.60); 
+    size_t gdal_cache_bytes = (size_t)(available_ram_bytes * 0.20);  
+    size_t pinned_mem_limit = total_allowed_ram - gdal_cache_bytes;  
 
-    const int TILE_HEIGHT = chunk_size;
-
-    GDALAllRegister();
-    GDALDataset* rasterfile = (GDALDataset*)GDALOpen(input_file.c_str(), GA_ReadOnly);
-
-    GDALRasterBand* band_red = rasterfile->GetRasterBand(red_band_index);
-    GDALRasterBand* band_nir = rasterfile->GetRasterBand(nir_band_index);
-
-    int blockXSize = band_red->GetXSize(), blockYSize = band_red->GetYSize();
-    std::vector<float>* buffer_red_pixels = new std::vector<float>(TILE_HEIGHT * blockXSize);
-    std::vector<float>* buffer_nir_pixels = new std::vector<float>(TILE_HEIGHT * blockXSize);
-    std::vector<float>* buffer_ndvi_pixels = new std::vector<float>(TILE_HEIGHT * blockXSize);
-
-    float* gpu_buffer_red_pixels, *gpu_buffer_nir_pixels, *gpu_buffer_ndvi_pixels;
-
-    cudaMalloc((void**)&gpu_buffer_red_pixels, TILE_HEIGHT * blockXSize * sizeof(float));
-    cudaMalloc((void**)&gpu_buffer_nir_pixels, TILE_HEIGHT * blockXSize * sizeof(float));
-    cudaMalloc((void**)&gpu_buffer_ndvi_pixels, TILE_HEIGHT * blockXSize * sizeof(float));
-
-    double geoTransform[6];
-    rasterfile->GetGeoTransform(geoTransform);
-    const char* projection = rasterfile->GetProjectionRef();
-
-    GDALDriver* gtiffDriver = GetGDALDriverManager()->GetDriverByName("GTiff");
-    GDALDataset* outRaster = gtiffDriver->Create(
-        output_file.c_str(), blockXSize, blockYSize, 1, GDT_Float32, nullptr
-    );
-    outRaster->SetGeoTransform(geoTransform);
-    outRaster->SetProjection(projection);
-    GDALRasterBand* outBand = outRaster->GetRasterBand(1);
-
-    std::cout << "Writing NDVI to disk..." << std::endl;
-
-    double progress = -1.0;
     if (verbose) {
-        GDALTermProgress(0.0, nullptr, &progress);
+        std::cout << "[Adaptive Engine] OS Available RAM: " << (available_ram_bytes / (1024*1024*1024.0)) << " GB" << std::endl;
+        std::cout << "[Adaptive Engine] Budgeting " << (total_allowed_ram / (1024*1024*1024.0)) << " GB total (60% limit)." << std::endl;
     }
 
-    for (int y_offset = 0; y_offset < blockYSize; y_offset += TILE_HEIGHT) {
-        int current_tile_height = std::min(TILE_HEIGHT, blockYSize - y_offset);
-        size_t current_pixels = current_tile_height * blockXSize;
+    std::string cache_mb_str = std::to_string(gdal_cache_bytes / (1024 * 1024));
+    CPLSetConfigOption("GDAL_CACHEMAX", cache_mb_str.c_str());
+    if (verbose) std::cout << "[Adaptive Engine] Set GDAL Cache to: " << cache_mb_str << " MB" << std::endl;
 
-        band_red->RasterIO(
-            GF_Read,
-            0, y_offset,
-            blockXSize, current_tile_height,
-            buffer_red_pixels->data(),
-            blockXSize, current_tile_height,
-            GDT_Float32,
-            0, 0
-        );
-
-        band_nir->RasterIO(
-            GF_Read,
-            0, y_offset,
-            blockXSize, current_tile_height,
-            buffer_nir_pixels->data(),
-            blockXSize, current_tile_height,
-            GDT_Float32,
-            0, 0
-        );
+    size_t bytes_per_pixel = (f.band_indices.size() + 1) * sizeof(float); 
+    size_t bytes_per_row_total = (size_t)f.width * bytes_per_pixel * num_threads;
     
-        cudaMemcpy(gpu_buffer_red_pixels, buffer_red_pixels->data(), current_pixels * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(gpu_buffer_nir_pixels, buffer_nir_pixels->data(), current_pixels * sizeof(float), cudaMemcpyHostToDevice);
+    int max_safe_rows = pinned_mem_limit / bytes_per_row_total;
 
-        const int blocksPerGrid = (current_pixels + threadsPerBlock - 1) / threadsPerBlock;
+    int actual_chunk_height;
+    if (f.block_y > 1) {
+        actual_chunk_height = f.block_y; 
+        while (actual_chunk_height + f.block_y <= max_safe_rows) {
+            actual_chunk_height += f.block_y;
+        }
+    } else {
+        actual_chunk_height = std::min(512, max_safe_rows);
+    }
+
+    if (actual_chunk_height == 0) {
+        actual_chunk_height = f.block_y > 1 ? f.block_y : 1;
+        if (verbose) std::cout << "[WARNING] Insufficient RAM to meet 60% rule. Forcing minimum chunk height." << std::endl;
+    }
+
+    if (verbose) std::cout << "[Adaptive Engine] Tuned Chunk Height: " << actual_chunk_height << " rows." << std::endl;
+
+    CPLSetConfigOption("GDAL_SWATH_SIZE", "200000000");
+    omp_set_num_threads(num_threads);
+
+    GDALDriver* driver = GetGDALDriverManager()->GetDriverByName("GTiff");
+    char** flags = nullptr;
+    flags = CSLSetNameValue(flags, "COMPRESS", "ZSTD");
+    flags = CSLSetNameValue(flags, "ZSTD_LEVEL", "1");
+    flags = CSLSetNameValue(flags, "NUM_THREADS", "ALL_CPUS");
+    flags = CSLSetNameValue(flags, "TILED", "YES");
+    flags = CSLSetNameValue(flags, "BLOCKXSIZE", "512");
+    flags = CSLSetNameValue(flags, "BLOCKYSIZE", "512");
+    flags = CSLSetNameValue(flags, "INTERLEAVE", "BAND");
+    flags = CSLSetNameValue(flags, "BIGTIFF", "IF_SAFER");
+
+    GDALDataset* out_ds = driver->Create(f.output_file, f.width, f.height, 1, GDT_Float32, flags);
+    out_ds->SetGeoTransform(f.geoTransform);
+    out_ds->SetProjection(f.projection.c_str());
+    GDALRasterBand* out_band = out_ds->GetRasterBand(1);
+    out_band->SetNoDataValue(-9999.0);
+    CSLDestroy(flags);
+
+    GDALDatasetContainer container(num_threads, f.band_indices.size());
+    std::vector<int> band_map; 
+
+    for (int i = 0; i < num_threads; ++i) {
+        container.in_datasets[i] = (GDALDataset*)GDALOpen(f.input_file, GA_ReadOnly);
+        int idx = 0;
+        for (int band: f.band_indices) {
+            container.bands[i][idx] = container.in_datasets[i]->GetRasterBand(band + 1);
+            if (i == 0) band_map.push_back(band + 1); 
+            idx++;
+        }
+    }
+
+    size_t max_pixels = (size_t)f.width * actual_chunk_height;
+    size_t max_bytes_per_band = max_pixels * sizeof(float);
+
+    std::vector<ThreadBuffers> pool(num_threads);
+    for (int t = 0; t < num_threads; ++t) {
+        pool[t].alloc(max_bytes_per_band, f.band_indices.size());
+    }
+
+    int num_chunks = (f.height + actual_chunk_height - 1) / actual_chunk_height;
+
+    Instruction* d_program;
+    cudaCheck(cudaMalloc(&d_program, f.raster_algebric_instructions.size() * sizeof(Instruction)));
+    cudaCheck(cudaMemcpy(d_program, f.raster_algebric_instructions.data(), f.raster_algebric_instructions.size() * sizeof(Instruction), cudaMemcpyHostToDevice));
+
+    std::atomic<int> completed_chunks{0};
+    double progress_state = -1.0; 
+    
+    if (verbose) {
+        GDALTermProgress(0.0, nullptr, &progress_state); 
+    }
+
+    #pragma omp parallel for schedule(dynamic, 1)
+    for (int chunk = 0; chunk < num_chunks; ++chunk) {
+        int tid = omp_get_thread_num();
+        int y_offset = chunk * actual_chunk_height;
+        int cur_h = std::min(actual_chunk_height, f.height - y_offset);
+        size_t pixels = (size_t)f.width * cur_h;
+
+        ThreadBuffers& buf = pool[tid];
+
+        if (chunk + 2 < num_chunks) {
+            int adv_y = (chunk + 2) * actual_chunk_height;
+            int adv_h = std::min(actual_chunk_height, f.height - adv_y);
+            container.in_datasets[tid]->AdviseRead(0, adv_y, f.width, adv_h, f.width, adv_h, GDT_Float32, 0, nullptr, nullptr);
+        }
         
-        compute_ndvi<<<blocksPerGrid, threadsPerBlock>>>(gpu_buffer_red_pixels, gpu_buffer_nir_pixels, gpu_buffer_ndvi_pixels, current_pixels);
-        cudaDeviceSynchronize();
+        if (f.interleave == "PIXEL") {
+            size_t pixel_space = sizeof(float);
+            size_t line_space = (size_t)f.width * sizeof(float);
+            size_t band_space = max_bytes_per_band;
 
-        cudaMemcpy(buffer_ndvi_pixels->data(), gpu_buffer_ndvi_pixels, current_pixels * sizeof(float), cudaMemcpyDeviceToHost);
-
-        outRaster->GetRasterBand(1)->RasterIO(
-            GF_Write, 0, y_offset, blockXSize, current_tile_height,
-            buffer_ndvi_pixels->data(), blockXSize, current_tile_height, GDT_Float32, 0, 0
-        );
-
-        if (verbose) {
-            double fraction_complete = (double)(y_offset + current_tile_height) / blockYSize;
-            GDALTermProgress(fraction_complete, nullptr, &progress);
+            CPLErr err = container.in_datasets[tid]->RasterIO(
+                GF_Read, 0, y_offset, f.width, cur_h,
+                buf.h_master_block,
+                f.width, cur_h, GDT_Float32,
+                band_map.size(), band_map.data(),
+                pixel_space, line_space, band_space, nullptr
+            );
+        } else {
+            for (int b = 0; b < f.band_indices.size(); b++) {
+                CPLErr err = container.bands[tid][b]->RasterIO(
+                    GF_Read, 0, y_offset, f.width, cur_h, 
+                    buf.host_bands_ptrs[b], 
+                    f.width, cur_h, GDT_Float32, 0, 0
+                );
+            }
         }
 
+        size_t groups = (pixels + 3) / 4;
+        int blocks = (int)((groups + threadsPerBlock - 1) / threadsPerBlock);
+
+        compute_raster_algebra<<<blocks, threadsPerBlock, 0, buf.stream>>>(
+            d_program,
+            f.raster_algebric_instructions.size(),
+            buf.master_device_bands_ptrs,
+            buf.d_output_ptr,
+            pixels);
+
+        cudaCheck(cudaStreamSynchronize(buf.stream));
+
+        #pragma omp critical
+        {
+            (void)out_band->RasterIO(GF_Write, 0, y_offset, f.width, cur_h, buf.h_output_ptr, f.width, cur_h, GDT_Float32, 0, 0);
+            
+            int current_completed = ++completed_chunks;
+            if (verbose) {
+                GDALTermProgress(static_cast<double>(current_completed) / num_chunks, nullptr, &progress_state);
+                fflush(stdout); 
+            }
+        }
     }
 
-    cudaFree(gpu_buffer_red_pixels);
-    cudaFree(gpu_buffer_nir_pixels);
-    cudaFree(gpu_buffer_ndvi_pixels);
-
-    delete buffer_red_pixels;
-    delete buffer_nir_pixels;
-    delete buffer_ndvi_pixels;
-
-    GDALClose(outRaster);
-    GDALClose(rasterfile);
+    for (int i = 0; i < num_threads; ++i) {
+        GDALClose(container.in_datasets[i]);
+        pool[i].free_all();
+    }
+    GDALClose(out_ds);
+    cudaFree(d_program);
 }
 
 PYBIND11_MODULE(curaster, m) {
@@ -380,25 +444,22 @@ PYBIND11_MODULE(curaster, m) {
     CPLSetConfigOption("PROJ_DATA", proj_path.c_str());
     CPLSetConfigOption("GDAL_DATA", gdal_path.c_str());
 
-    m.def("ndvi", &curaster, R"pbdoc(
-Computes the Normalized Difference Vegetation Index (NDVI) from a raster file.
+    m.def("compute", &compute_algebra, R"pbdoc(
+Computes raster algebra from a string expression on the GPU.
 
-This function reads the specified red and near-infrared (NIR) bands from the input
-raster, processes the NDVI on the GPU, and writes the results directly to disk.
+This function reads the specified bands from the input raster, processes the 
+algebraic expression on the GPU using zero-copy pinned memory, and writes 
+the results directly to disk.
 
 Args:
     input_file (str): Path to the input GeoTIFF file.
-    output_file (str): Path where the resulting NDVI GeoTIFF will be saved.
-    red_band_index (int): The index of the Red band.
-    nir_band_index (int): The index of the Near-Infrared band.
-    chunk_size (int, optional): The height of the chunk to process in memory at once. Defaults to 256.
-    verbose (bool, optional): If True, displays a progress bar. Defaults to True.
+    output_file (str): Path where the resulting GeoTIFF will be saved.
+    expression (str): The algebraic formula (e.g., "(((B1*B1)+(B2*B2))/((B3*B3)+(B4*B4)+1.0))*((B1-B2)/(B3+B4+0.5))+123.45").
+    verbose (bool, optional): If True, displays memory telemetry and a progress bar. Defaults to True.
 )pbdoc",
         pybind11::arg("input_file"),
         pybind11::arg("output_file"),
-        pybind11::arg("red_band_index"),
-        pybind11::arg("nir_band_index"),
-        pybind11::arg("chunk_size") = 256,
+        pybind11::arg("expression"),
         pybind11::arg("verbose") = true
     );
 }
