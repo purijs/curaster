@@ -5,13 +5,18 @@ find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 find_package(pybind11 CONFIG REQUIRED)
 
 find_package(GDAL REQUIRED)
+find_package(OpenMP REQUIRED)
 
 set(CMAKE_CUDA_RUNTIME_LIBRARY Static)
 set(CMAKE_CUDA_ARCHITECTURES "75;80;86;89;90")
 
 pybind11_add_module(curaster MODULE src/raster.cu)
 
-target_link_libraries(curaster PRIVATE GDAL::GDAL)
+target_compile_options(curaster PRIVATE 
+    $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math;-Xptxas;-O3>
+)
+
+target_link_libraries(curaster PRIVATE GDAL::GDAL OpenMP::OpenMP_CXX)
 
 install(TARGETS curaster DESTINATION .)
 
