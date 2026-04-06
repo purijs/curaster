@@ -22,6 +22,24 @@ const int threadsPerBlock = 256;
 enum TokenType { NUMBER, OPERATOR, PARENTHESIS, BAND };
 enum Opcode { OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_LOAD_BAND, OP_LOAD_CONST };
 
+struct Instruction {
+    Opcode op;
+    float constant;
+    int band_index;
+};
+
+struct Token {
+    TokenType type;
+    std::string value;
+};
+
+__device__ inline float4 add_f4(float4 a, float4 b) { return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w); }
+__device__ inline float4 sub_f4(float4 a, float4 b) { return make_float4(a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w); }
+__device__ inline float4 mul_f4(float4 a, float4 b) { return make_float4(a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w); }
+__device__ inline float4 div_f4(float4 a, float4 b) {
+    return make_float4(__fdividef(a.x, b.x + 1e-6f), __fdividef(a.y, b.y + 1e-6f), __fdividef(a.z, b.z + 1e-6f), __fdividef(a.w, b.w + 1e-6f));
+}
+
 __global__ void compute_raster_algebra(const Instruction* __restrict__ program, int num_instructions, const float* const* __restrict__ bands, float* __restrict__ output, size_t size) {
     size_t base = ((size_t)blockIdx.x * blockDim.x + threadIdx.x) * 4;
     size_t stride = (size_t)gridDim.x * blockDim.x * 4;
@@ -77,17 +95,6 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
       if (abort) exit(code);
    }
 }
-
-struct Instruction {
-    Opcode op;
-    float constant;
-    int band_index;
-};
-
-struct Token {
-    TokenType type;
-    std::string value;
-};
 
 struct ThreadBuffers {
     float* h_master_block = nullptr; 
@@ -160,13 +167,6 @@ struct file_info {
     std::string interleave;
     std::string compression;
 };
-
-__device__ inline float4 add_f4(float4 a, float4 b) { return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w); }
-__device__ inline float4 sub_f4(float4 a, float4 b) { return make_float4(a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w); }
-__device__ inline float4 mul_f4(float4 a, float4 b) { return make_float4(a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w); }
-__device__ inline float4 div_f4(float4 a, float4 b) {
-    return make_float4(__fdividef(a.x, b.x + 1e-6f), __fdividef(a.y, b.y + 1e-6f), __fdividef(a.z, b.z + 1e-6f), __fdividef(a.w, b.w + 1e-6f));
-}
 
 int get_precedence(const std::string& op) {
     if (op == "+" || op == "-") return 1;
