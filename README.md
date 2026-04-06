@@ -1,6 +1,6 @@
 # cuRaster
 
-Curaster is a high-performance Python module written in C++ and CUDA. It is designed to compute the Normalized Difference Vegetation Index (NDVI) on massive raster datasets using GPU.
+cuRaster is a high-performance Python module written in C++ and CUDA. It is designed to compute general raster algebra expressions on massive raster datasets using GPU acceleration.
 
 ## Installation
 
@@ -18,7 +18,7 @@ To build and run this module from source, your system needs:
 - GDAL C++ library (`libgdal-dev`)
 - CMake 3.18+
 - pybind11 (`pip install pybind11`)
-- A C++17-compatible compiler
+- A C++20-compatible compiler
 
 ## Usage
 
@@ -27,30 +27,26 @@ Once installed, simply import it into Python:
 ```python
 import curaster
 
-curaster.ndvi(
-    input_file="data/massive_satellite_image.tif",
-    output_file="data/output_ndvi.tif",
-    red_band_index=3,
-    nir_band_index=4,
-    chunk_size=256,    # Align this with your TIFF's BLOCKYSIZE for max speed
+curaster.compute(
+    input_file="input.tif",
+    output_file="output.tif",
+    expression="(B4-B1)/(B4+B1)",
     verbose=True
 )
 ```
 
 ## API Reference
 
-### `curaster.ndvi(...)`
+### `curaster.compute(...)`
 
-Calculates `(NIR - Red) / (NIR + Red)` and saves the result to a new single-band Float32 GeoTIFF.
+Computes raster algebra from a string expression on the GPU and saves the result to a new single-band Float32 GeoTIFF.
 
-| Argument         | Type   |  Default | Description                                                                 |
-| ---------------- | ------ | -------: | --------------------------------------------------------------------------- |
-| `input_file`     | `str`  | Required | Path to the input multispectral raster.                                     |
-| `output_file`    | `str`  | Required | Path where the output NDVI raster will be saved.                            |
-| `red_band_index` | `int`  | Required | The GDAL band number (1-indexed) containing Red data.                       |
-| `nir_band_index` | `int`  | Required | The GDAL band number (1-indexed) containing NIR data.                       |
-| `chunk_size`     | `int`  |    `256` | The number of horizontal rows to process at a time.                         |
-| `verbose`        | `bool` |    `True`| If true, prints a progress bar to the terminal.                             |
+| Argument     | Type   |  Default | Description                                                                 |
+| ------------ | ------ | -------: | --------------------------------------------------------------------------- |
+| `input_file` | `str`  | Required | Path to the input multispectral raster                                     |
+| `output_file`| `str`  | Required | Path where the output raster will be saved                                 |
+| `expression` | `str`  | Required | The algebraic formula (e.g., "(B4-B1)/(B4+B1)"). Bands are referenced as B1, B2, etc. (1-indexed) |
+| `verbose`    | `bool` |    `True`| If true, prints memory telemetry and a progress bar to the terminal      |
 
 ## Building from Source
 
@@ -66,7 +62,7 @@ make
 Alternatively, you can compile directly with `nvcc`:
 
 ```bash
-nvcc -O3 -shared -std=c++17 -Xcompiler -fPIC \
+nvcc -O3 -shared -std=c++20 -Xcompiler -fPIC -Xcompiler -fopenmp --use_fast_math \
     -o curaster$(python3-config --extension-suffix) src/raster.cu \
     $(python3 -m pybind11 --includes) \
     $(gdal-config --cflags) $(gdal-config --libs)
