@@ -1,4 +1,5 @@
 # cuRaster
+[![Build and Publish Release](https://github.com/purijs/curaster/actions/workflows/release.yml/badge.svg)](https://github.com/purijs/curaster/actions/workflows/release.yml)
 
 cuRaster is a high-performance Python module written in C++ and CUDA. It is designed to compute general raster algebra expressions on massive raster datasets using GPU acceleration.
 
