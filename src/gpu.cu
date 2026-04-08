@@ -1,6 +1,5 @@
 #include "raster_core.h"
 #include <cuda_runtime.h>
-#include <math_functions.h>
 
 __device__ inline float4 f4add(float4 a,float4 b){return make_float4(a.x+b.x,a.y+b.y,a.z+b.z,a.w+b.w);}
 __device__ inline float4 f4sub(float4 a,float4 b){return make_float4(a.x-b.x,a.y-b.y,a.z-b.z,a.w-b.w);}
