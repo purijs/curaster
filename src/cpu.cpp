@@ -1,3 +1,5 @@
+#define NOMINMAX
+
 #include "raster_core.h"
 #include <iostream>
 #include <vector>
