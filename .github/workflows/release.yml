@@ -10,8 +10,9 @@ on:
 
 jobs:
   build-wheels:
+    name: Build Linux Wheels
     runs-on: ubuntu-latest
-    container: nvidia/cuda:12.2.2-devel-ubuntu22.04 
+    container: nvidia/cuda:12.4.1-devel-ubuntu22.04 
     strategy:
       matrix:
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
@@ -22,7 +23,7 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           apt-get update
-          apt-get install -y software-properties-common gdal-bin libgdal-dev cmake git build-essential patchelf libomp-dev
+          apt-get install -y software-properties-common gdal-bin libgdal-dev cmake git build-essential patchelf libomp-dev libssl-dev libcurl4-openssl-dev
           
           add-apt-repository ppa:deadsnakes/ppa -y
           apt-get update
@@ -51,16 +52,16 @@ jobs:
           . /venv/bin/activate
           python -m build --wheel
 
-      - name: Bundle GDAL into the Wheel
+      - name: Bundle GDAL into the Wheel (Exclude CUDA Runtime)
         run: |
           . /venv/bin/activate
-          auditwheel repair dist/*.whl --plat manylinux_2_35_x86_64 -w wheelhouse/
+          auditwheel repair dist/*.whl --plat manylinux_2_35_x86_64 --exclude libcudart.so.12 -w wheelhouse/
 
       - name: Smoke Test the Wheel
         run: |
           . /venv/bin/activate
           pip install wheelhouse/*.whl
-          python -c "import curaster; print('Smoke test passed!')"
+          python -c "import curaster; print('Linux smoke test passed!')"
 
       - name: Upload Wheel as Artifact
         uses: actions/upload-artifact@v4
@@ -109,12 +110,12 @@ jobs:
         run: |
           $env:CMAKE_GENERATOR = "Ninja"
           $env:CMAKE_PREFIX_PATH = "$env:CONDA_PREFIX\Library"
-          python -m build --wheel
+          python -m build --wheel --no-isolation
 
       - name: Bundle GDAL into the Wheel (Delvewheel)
         shell: pwsh
         run: |
-          delvewheel repair dist/*.whl -w wheelhouse/ --add-path "$env:CONDA_PREFIX\Library\bin"
+          delvewheel repair dist/*.whl -w wheelhouse/ --add-path "$env:CONDA_PREFIX\Library\bin" --no-dll "cudart64_12.dll;nvcuda.dll"
 
       - name: Smoke Test the Wheel
         shell: pwsh
