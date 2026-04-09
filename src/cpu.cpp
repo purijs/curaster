@@ -44,8 +44,10 @@ inline void gpuAssert(cudaError_t c, const char* f, int l, bool a = true) {
 
 static const int kNumThreads = (std::max)(1,(int)std::thread::hardware_concurrency()-1);
 
-enum TokenType { NUMBER, OPERATOR, PARENTHESIS, BAND, COMPARE_OP, LOGICAL_OP, FUNC_KW, ARG_SEP };
-struct RpnToken { TokenType type; std::string value; };
+// --- FIX: Renamed to avoid Windows SDK TOKEN_TYPE collisions ---
+enum RpnTokenType { NUMBER, OPERATOR, PARENTHESIS, BAND, COMPARE_OP, LOGICAL_OP, FUNC_KW, ARG_SEP };
+struct RpnToken { RpnTokenType tok_type; std::string value; };
+// ---------------------------------------------------------------
 
 struct GDALDatasetContainer {
     std::vector<GDALDataset*> in_datasets;
@@ -73,19 +75,20 @@ static std::vector<RpnToken> tokenize_rpn(const std::string& expr, std::set<int>
     std::vector<RpnToken> toks,ops,out;
     for(int i=0;i<(int)expr.size();i++){
         char c=expr[i]; if(c==' ')continue;
-        if(c=='('||c==')')toks.push_back({PARENTHESIS, std::string(1, c)});
-        else if(c=='+'||c=='-'||c=='*'||c=='/')toks.push_back({OPERATOR, std::string(1, c)});
+        // --- FIX: Explicitly cast RpnToken to satisfy MSVC ---
+        if(c=='('||c==')')toks.push_back(RpnToken{PARENTHESIS, std::string(1, c)});
+        else if(c=='+'||c=='-'||c=='*'||c=='/')toks.push_back(RpnToken{OPERATOR, std::string(1, c)});
         else if(c=='B'||c=='b'){
             i++;std::string n; while(i<(int)expr.size()&&isdigit(expr[i]))n+=expr[i++];
-            bi.insert(std::stoi(n)-1); toks.push_back({BAND,std::to_string(std::stoi(n)-1)}); i--;
+            bi.insert(std::stoi(n)-1); toks.push_back(RpnToken{BAND,std::to_string(std::stoi(n)-1)}); i--;
         } else if(isdigit(c)||c=='.'){
             std::string n; while(i<(int)expr.size()&&(isdigit(expr[i])||expr[i]=='.'))n+=expr[i++];
-            toks.push_back({NUMBER,n}); i--;
+            toks.push_back(RpnToken{NUMBER,n}); i--;
         }
     }
     for(auto& t:toks){
-        if(t.type==BAND||t.type==NUMBER){out.push_back(t);}
-        else if(t.type==PARENTHESIS){
+        if(t.tok_type==BAND||t.tok_type==NUMBER){out.push_back(t);}
+        else if(t.tok_type==PARENTHESIS){
             if(t.value=="(")ops.push_back(t);
             else{while(!ops.empty()&&ops.back().value!="("){out.push_back(ops.back());ops.pop_back();}if(!ops.empty())ops.pop_back();}
         } else {
@@ -101,8 +104,8 @@ static std::vector<Instruction> compile_rpn(const std::vector<RpnToken>& rpn, co
     std::vector<Instruction> insts;
     for(auto& t:rpn){
         Instruction ins{};
-        if(t.type==NUMBER){ins.op=OP_LOAD_CONST;ins.constant=std::stof(t.value);ins.band_index=-1;}
-        else if(t.type==BAND){
+        if(t.tok_type==NUMBER){ins.op=OP_LOAD_CONST;ins.constant=std::stof(t.value);ins.band_index=-1;}
+        else if(t.tok_type==BAND){
             ins.op=OP_LOAD_BAND;ins.constant=0.f;
             ins.band_index=(int)std::distance(bi.begin(),bi.find(std::stoi(t.value)));
         } else {
@@ -121,29 +124,29 @@ static std::vector<RpnToken> lex_reclass(const std::string& expr, std::set<int>&
     for(int i=0;i<n;){
         char c=expr[i];
         if(c==' '||c=='\t'){i++;continue;}
-        if(c==','){ toks.push_back({ARG_SEP,","}); i++; continue; }
-        if(c=='('||c==')'){ toks.push_back({PARENTHESIS, std::string(1, c)}); i++; continue; }
-        if(c=='+'||c=='-'||c=='*'||c=='/'){ toks.push_back({OPERATOR, std::string(1, c)}); i++; continue; }
+        if(c==','){ toks.push_back(RpnToken{ARG_SEP,","}); i++; continue; }
+        if(c=='('||c==')'){ toks.push_back(RpnToken{PARENTHESIS, std::string(1, c)}); i++; continue; }
+        if(c=='+'||c=='-'||c=='*'||c=='/'){ toks.push_back(RpnToken{OPERATOR, std::string(1, c)}); i++; continue; }
         if(c=='>'||c=='<'||c=='='||c=='!'){
             std::string op(1, c); i++;
             if(i<n&&expr[i]=='='){op+=expr[i++];}
-            toks.push_back({COMPARE_OP,op}); continue;
+            toks.push_back(RpnToken{COMPARE_OP,op}); continue;
         }
         if(isdigit(c)||c=='.'){
             std::string num; while(i<n&&(isdigit(expr[i])||expr[i]=='.')) num+=expr[i++];
-            toks.push_back({NUMBER,num}); continue;
+            toks.push_back(RpnToken{NUMBER,num}); continue;
         }
         if(isalpha(c)||c=='_'){
             std::string word; while(i<n&&(isalnum(expr[i])||expr[i]=='_')) word+=expr[i++];
             if((word[0]=='B'||word[0]=='b')&&word.size()>1&&isdigit(word[1])){
                 int idx=std::stoi(word.substr(1))-1; bi.insert(idx);
-                toks.push_back({BAND,std::to_string(idx)}); continue;
+                toks.push_back(RpnToken{BAND,std::to_string(idx)}); continue;
             }
             std::string up=str_toupper(word);
-            if(up=="AND"||up=="OR")  { toks.push_back({LOGICAL_OP,up}); continue; }
-            if(up=="NOT")            { toks.push_back({LOGICAL_OP,"NOT"}); continue; }
-            if(up=="IF"||up=="BETWEEN"||up=="CLAMP"||up=="MIN"||up=="MAX"){ toks.push_back({FUNC_KW,up}); continue; }
-            try { std::stof(word); toks.push_back({NUMBER,word}); } catch(...) {}
+            if(up=="AND"||up=="OR")  { toks.push_back(RpnToken{LOGICAL_OP,up}); continue; }
+            if(up=="NOT")            { toks.push_back(RpnToken{LOGICAL_OP,"NOT"}); continue; }
+            if(up=="IF"||up=="BETWEEN"||up=="CLAMP"||up=="MIN"||up=="MAX"){ toks.push_back(RpnToken{FUNC_KW,up}); continue; }
+            try { std::stof(word); toks.push_back(RpnToken{NUMBER,word}); } catch(...) {}
             continue;
         }
         i++; 
@@ -165,20 +168,20 @@ static bool is_right_assoc(const std::string& op){ return op=="NOT"; }
 static std::vector<RpnToken> shunting_yard_reclass(const std::vector<RpnToken>& toks){
     std::vector<RpnToken> out, ops;
     for(auto& t:toks){
-        if(t.type==NUMBER||t.type==BAND){ out.push_back(t); } 
-        else if(t.type==FUNC_KW){ ops.push_back(t); } 
-        else if(t.type==PARENTHESIS&&t.value=="("){ ops.push_back(t); } 
-        else if(t.type==ARG_SEP){
-            while(!ops.empty()&&!(ops.back().type==PARENTHESIS&&ops.back().value=="(")){ out.push_back(ops.back()); ops.pop_back(); }
-        } else if(t.type==PARENTHESIS&&t.value==")"){
-            while(!ops.empty()&&!(ops.back().type==PARENTHESIS&&ops.back().value=="(")){ out.push_back(ops.back()); ops.pop_back(); }
+        if(t.tok_type==NUMBER||t.tok_type==BAND){ out.push_back(t); } 
+        else if(t.tok_type==FUNC_KW){ ops.push_back(t); } 
+        else if(t.tok_type==PARENTHESIS&&t.value=="("){ ops.push_back(t); } 
+        else if(t.tok_type==ARG_SEP){
+            while(!ops.empty()&&!(ops.back().tok_type==PARENTHESIS&&ops.back().value=="(")){ out.push_back(ops.back()); ops.pop_back(); }
+        } else if(t.tok_type==PARENTHESIS&&t.value==")"){
+            while(!ops.empty()&&!(ops.back().tok_type==PARENTHESIS&&ops.back().value=="(")){ out.push_back(ops.back()); ops.pop_back(); }
             if(!ops.empty()) ops.pop_back(); 
-            if(!ops.empty()&&ops.back().type==FUNC_KW){ out.push_back(ops.back()); ops.pop_back(); }
-        } else if(t.type==OPERATOR||t.type==COMPARE_OP||t.type==LOGICAL_OP){
+            if(!ops.empty()&&ops.back().tok_type==FUNC_KW){ out.push_back(ops.back()); ops.pop_back(); }
+        } else if(t.tok_type==OPERATOR||t.tok_type==COMPARE_OP||t.tok_type==LOGICAL_OP){
             int tp=prec_reclass(t.value); bool rta=is_right_assoc(t.value);
             while(!ops.empty()){
                 auto& top=ops.back();
-                if(top.type==PARENTHESIS||top.type==FUNC_KW) break;
+                if(top.tok_type==PARENTHESIS||top.tok_type==FUNC_KW) break;
                 int topP=prec_reclass(top.value); if(topP<0) break;
                 if(rta?topP>tp:topP>=tp){ out.push_back(top); ops.pop_back(); } else break;
             }
@@ -195,14 +198,14 @@ static std::vector<Instruction> compile_reclass(const std::vector<RpnToken>& rpn
     std::vector<Instruction> insts;
     for(auto& t:rpn){
         Instruction ins{}; ins.constant=0.f; ins.band_index=-1;
-        if(t.type==NUMBER){ ins.op=OP_LOAD_CONST; ins.constant=std::stof(t.value); } 
-        else if(t.type==BAND){ ins.op=OP_LOAD_BAND; ins.band_index=(int)std::distance(bi.begin(),bi.find(std::stoi(t.value))); } 
-        else if(t.type==OPERATOR){ switch(t.value[0]){case '+':ins.op=OP_ADD;break;case '-':ins.op=OP_SUB;break;case '*':ins.op=OP_MUL;break;case '/':ins.op=OP_DIV;break;default:ins.op=OP_ADD;} } 
-        else if(t.type==COMPARE_OP){
+        if(t.tok_type==NUMBER){ ins.op=OP_LOAD_CONST; ins.constant=std::stof(t.value); } 
+        else if(t.tok_type==BAND){ ins.op=OP_LOAD_BAND; ins.band_index=(int)std::distance(bi.begin(),bi.find(std::stoi(t.value))); } 
+        else if(t.tok_type==OPERATOR){ switch(t.value[0]){case '+':ins.op=OP_ADD;break;case '-':ins.op=OP_SUB;break;case '*':ins.op=OP_MUL;break;case '/':ins.op=OP_DIV;break;default:ins.op=OP_ADD;} } 
+        else if(t.tok_type==COMPARE_OP){
             if(t.value==">") ins.op=OP_GT; else if(t.value=="<") ins.op=OP_LT; else if(t.value==">=") ins.op=OP_GTE; else if(t.value=="<=") ins.op=OP_LTE; else if(t.value=="==") ins.op=OP_EQ; else if(t.value=="!=") ins.op=OP_NEQ;
-        } else if(t.type==LOGICAL_OP){
+        } else if(t.tok_type==LOGICAL_OP){
             if(t.value=="AND") ins.op=OP_AND; else if(t.value=="OR") ins.op=OP_OR; else if(t.value=="NOT") ins.op=OP_NOT;
-        } else if(t.type==FUNC_KW){
+        } else if(t.tok_type==FUNC_KW){
             if(t.value=="IF") ins.op=OP_IF; else if(t.value=="BETWEEN") ins.op=OP_BETWEEN; else if(t.value=="CLAMP") ins.op=OP_CLAMP; else if(t.value=="MIN") ins.op=OP_MIN2; else if(t.value=="MAX") ins.op=OP_MAX2;
         }
         insts.push_back(ins);
