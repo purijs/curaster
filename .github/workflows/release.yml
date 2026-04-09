@@ -108,8 +108,9 @@ jobs:
       - name: Build Python Wheel
         shell: pwsh
         run: |
-          $env:CMAKE_GENERATOR = "Ninja"
+          $env:CMAKE_GENERATOR = "Visual Studio 17 2022"
           $env:CMAKE_PREFIX_PATH = "$env:CONDA_PREFIX\Library"
+          $env:CMAKE_ARGS = "-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF -DPYBIND11_LTO_CXX_FLAGS=''"
           python -m build --wheel --no-isolation
 
       - name: Bundle GDAL into the Wheel (Delvewheel)
