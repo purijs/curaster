@@ -1,4 +1,11 @@
+#ifdef _WIN32
 #define NOMINMAX
+#include <windows.h>
+#include <io.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#define unlink _unlink
+#endif
 
 #include "raster_core.h"
 #include <iostream>
@@ -35,10 +42,10 @@ inline void gpuAssert(cudaError_t c, const char* f, int l, bool a = true) {
     if (c != cudaSuccess) { fprintf(stderr,"GPU Error: %s at %s:%d\n",cudaGetErrorString(c),f,l); if(a)exit(c); }
 }
 
-static const int kNumThreads = std::max(1,(int)std::thread::hardware_concurrency()-1);
+static const int kNumThreads = (std::max)(1,(int)std::thread::hardware_concurrency()-1);
 
 enum TokenType { NUMBER, OPERATOR, PARENTHESIS, BAND, COMPARE_OP, LOGICAL_OP, FUNC_KW, ARG_SEP };
-struct Token { TokenType type; std::string value; };
+struct RpnToken { TokenType type; std::string value; };
 
 struct GDALDatasetContainer {
     std::vector<GDALDataset*> in_datasets;
@@ -53,6 +60,8 @@ static size_t get_avail_ram() {
     std::ifstream m("/proc/meminfo"); std::string line; size_t kb=0;
     while(std::getline(m,line))
         if(line.find("MemAvailable:")==0){sscanf(line.c_str(),"MemAvailable: %zu kB",&kb);break;}
+    // Fallback if /proc/meminfo isn't available (e.g. Windows)
+    if(kb==0) kb = 4 * 1024 * 1024; // Assume 4GB available as a safe fallback
     return kb*1024;
 }
 
@@ -60,12 +69,12 @@ static size_t get_avail_ram() {
 
 static int prec(const std::string& op){ return (op=="+"||op=="-")?1:(op=="*"||op=="/")?2:0; }
 
-static std::vector<Token> tokenize_rpn(const std::string& expr, std::set<int>& bi){
-    std::vector<Token> toks,ops,out;
+static std::vector<RpnToken> tokenize_rpn(const std::string& expr, std::set<int>& bi){
+    std::vector<RpnToken> toks,ops,out;
     for(int i=0;i<(int)expr.size();i++){
         char c=expr[i]; if(c==' ')continue;
-        if(c=='('||c==')')toks.push_back({PARENTHESIS,{c}});
-        else if(c=='+'||c=='-'||c=='*'||c=='/')toks.push_back({OPERATOR,{c}});
+        if(c=='('||c==')')toks.push_back({PARENTHESIS, std::string(1, c)});
+        else if(c=='+'||c=='-'||c=='*'||c=='/')toks.push_back({OPERATOR, std::string(1, c)});
         else if(c=='B'||c=='b'){
             i++;std::string n; while(i<(int)expr.size()&&isdigit(expr[i]))n+=expr[i++];
             bi.insert(std::stoi(n)-1); toks.push_back({BAND,std::to_string(std::stoi(n)-1)}); i--;
@@ -88,7 +97,7 @@ static std::vector<Token> tokenize_rpn(const std::string& expr, std::set<int>& b
     return out;
 }
 
-static std::vector<Instruction> compile_rpn(const std::vector<Token>& rpn, const std::set<int>& bi){
+static std::vector<Instruction> compile_rpn(const std::vector<RpnToken>& rpn, const std::set<int>& bi){
     std::vector<Instruction> insts;
     for(auto& t:rpn){
         Instruction ins{};
@@ -107,16 +116,16 @@ static std::vector<Instruction> compile_rpn(const std::vector<Token>& rpn, const
 
 static std::string str_toupper(std::string s){ for(auto& c:s) c=(char)toupper((unsigned char)c); return s; }
 
-static std::vector<Token> lex_reclass(const std::string& expr, std::set<int>& bi){
-    std::vector<Token> toks; int n=(int)expr.size();
+static std::vector<RpnToken> lex_reclass(const std::string& expr, std::set<int>& bi){
+    std::vector<RpnToken> toks; int n=(int)expr.size();
     for(int i=0;i<n;){
         char c=expr[i];
         if(c==' '||c=='\t'){i++;continue;}
         if(c==','){ toks.push_back({ARG_SEP,","}); i++; continue; }
-        if(c=='('||c==')'){ toks.push_back({PARENTHESIS,{c}}); i++; continue; }
-        if(c=='+'||c=='-'||c=='*'||c=='/'){ toks.push_back({OPERATOR,{c}}); i++; continue; }
+        if(c=='('||c==')'){ toks.push_back({PARENTHESIS, std::string(1, c)}); i++; continue; }
+        if(c=='+'||c=='-'||c=='*'||c=='/'){ toks.push_back({OPERATOR, std::string(1, c)}); i++; continue; }
         if(c=='>'||c=='<'||c=='='||c=='!'){
-            std::string op{c}; i++;
+            std::string op(1, c); i++;
             if(i<n&&expr[i]=='='){op+=expr[i++];}
             toks.push_back({COMPARE_OP,op}); continue;
         }
@@ -153,8 +162,8 @@ static int prec_reclass(const std::string& op){
 }
 static bool is_right_assoc(const std::string& op){ return op=="NOT"; }
 
-static std::vector<Token> shunting_yard_reclass(const std::vector<Token>& toks){
-    std::vector<Token> out, ops;
+static std::vector<RpnToken> shunting_yard_reclass(const std::vector<RpnToken>& toks){
+    std::vector<RpnToken> out, ops;
     for(auto& t:toks){
         if(t.type==NUMBER||t.type==BAND){ out.push_back(t); } 
         else if(t.type==FUNC_KW){ ops.push_back(t); } 
@@ -180,9 +189,9 @@ static std::vector<Token> shunting_yard_reclass(const std::vector<Token>& toks){
     return out;
 }
 
-static std::vector<Token> tokenize_reclass(const std::string& expr, std::set<int>& bi){ return shunting_yard_reclass(lex_reclass(expr,bi)); }
+static std::vector<RpnToken> tokenize_reclass(const std::string& expr, std::set<int>& bi){ return shunting_yard_reclass(lex_reclass(expr,bi)); }
 
-static std::vector<Instruction> compile_reclass(const std::vector<Token>& rpn, const std::set<int>& bi){
+static std::vector<Instruction> compile_reclass(const std::vector<RpnToken>& rpn, const std::set<int>& bi){
     std::vector<Instruction> insts;
     for(auto& t:rpn){
         Instruction ins{}; ins.constant=0.f; ins.band_index=-1;
@@ -239,7 +248,15 @@ static std::vector<uint8_t> hmacv(const std::vector<uint8_t>& k,const std::strin
     uint8_t r[32];unsigned len=32;HMAC(EVP_sha256(),k.data(),(int)k.size(),(const uint8_t*)m.data(),m.size(),r,&len);return{r,r+32};
 }
 static std::vector<uint8_t> hmacs(const std::string& k,const std::string& m){return hmacv({k.begin(),k.end()},m);}
-static std::string utc_now(const char* fmt){time_t t=time(nullptr);struct tm buf;gmtime_r(&t,&buf);char b[32];strftime(b,sizeof(b),fmt,&buf);return b;}
+static std::string utc_now(const char* fmt){
+    time_t t=time(nullptr); struct tm buf;
+#ifdef _WIN32
+    gmtime_s(&buf, &t);
+#else
+    gmtime_r(&t, &buf);
+#endif
+    char b[32]; strftime(b,sizeof(b),fmt,&buf); return b;
+}
 static std::string uri_enc(const std::string& key){
     std::string r; for(unsigned char c:key){if(isalnum(c)||c=='-'||c=='_'||c=='.'||c=='~'||c=='/')r+=c;else{char buf[4];snprintf(buf,sizeof(buf),"%%%02X",c);r+=buf;}}return r;
 }
@@ -295,7 +312,7 @@ static S3Auth sign_s3_put(const std::string& bucket,const std::string& key,const
 static size_t curl_wcb(char* p,size_t sz,size_t nm,void* ud){ auto* v=(std::vector<uint8_t>*)ud; v->insert(v->end(),p,p+sz*nm); return sz*nm; }
 struct CurlReadCtx{const uint8_t* data; size_t size; size_t pos;};
 static size_t curl_rcb(void* buf,size_t sz,size_t nm,void* ud){
-    auto* c=(CurlReadCtx*)ud; size_t want=sz*nm; size_t avail=c->size-c->pos; size_t copy=std::min(want,avail);
+    auto* c=(CurlReadCtx*)ud; size_t want=sz*nm; size_t avail=c->size-c->pos; size_t copy=(std::min)(want,avail);
     memcpy(buf,c->data+c->pos,copy); c->pos+=copy; return copy;
 }
 
@@ -346,7 +363,7 @@ static void s3_fetch_tiles(std::vector<TileFetch>& jobs,const std::string& bucke
     std::vector<MR> ranges;
     for(size_t oi:order){
         uint64_t s=jobs[oi].offset,e=jobs[oi].offset+jobs[oi].count;
-        if(!ranges.empty()&&s<=ranges.back().end+gap)ranges.back().end=std::max(ranges.back().end,e);
+        if(!ranges.empty()&&s<=ranges.back().end+gap)ranges.back().end=(std::max)(ranges.back().end,e);
         else ranges.push_back({s,e,{},{}});
         ranges.back().ji.push_back(oi);
     }
@@ -395,7 +412,7 @@ static TiffIFDView load_tiff_ifd(const std::string& bucket,const std::string& ke
     TiffIFDView v; v.head=s3_fetch_range(bucket,key,region,ak,sk,0,131071);
     if(v.head.size()<8)throw std::runtime_error("S3 header fetch failed for s3://"+bucket+"/"+key);
     v.hp=v.head.data(); v.le=(v.hp[0]=='I'&&v.hp[1]=='I');
-    if(!v.le&&!(v.hp[0]=='M'&&v.hp[1]=='M')){std::string s((char*)v.hp,std::min((size_t)256,v.head.size()));throw std::runtime_error("Not a valid TIFF: "+s);}
+    if(!v.le&&!(v.hp[0]=='M'&&v.hp[1]=='M')){std::string s((char*)v.hp,(std::min)((size_t)256,v.head.size()));throw std::runtime_error("Not a valid TIFF: "+s);}
     uint16_t magic=ru16(v.hp+2,v.le); v.big=(magic==43);
     uint64_t ifd_off=v.big?ru64(v.hp+8,v.le):ru32(v.hp+4,v.le);
     v.ifd_p=v.hp;v.ifd_base=0;v.ifd_sz=v.head.size();
@@ -530,7 +547,7 @@ static std::vector<uint8_t> decomp(const std::vector<uint8_t>& src_data,int comp
 // ───────────────────────── TILE / STRIP EXTRACTORS ───────────────────────────
 
 static void extract_tile_bands(const float* tile,int tr,int tc,int y0,int ch,int imw, int bx,int by,int spp,bool pxil, const std::vector<int>& slots,const std::vector<float*>& hb,int bp=-1){
-    int tsr=tr*by,tsc=tc*bx,lr0=std::max(0,y0-tsr),lr1=std::min(by-1,y0+ch-1-tsr),lc1=std::min(bx-1,imw-tsc-1);
+    int tsr=tr*by,tsc=tc*bx,lr0=(std::max)(0,y0-tsr),lr1=(std::min)(by-1,y0+ch-1-tsr),lc1=(std::min)(bx-1,imw-tsc-1);
     for(int lr=lr0;lr<=lr1;lr++){int crow=tsr+lr-y0;
         for(int lc=0;lc<=lc1;lc++){int icol=tsc+lc;
             if(pxil){size_t pix=(size_t)lr*bx+lc;for(size_t s=0;s<slots.size();s++)hb[s][crow*imw+icol]=tile[pix*spp+slots[s]];}
@@ -540,7 +557,7 @@ static void extract_tile_bands(const float* tile,int tr,int tc,int y0,int ch,int
 }
 
 static void extract_strip_bands(const float* strip,int strip_first_row,int strip_rows, int y0,int cur_h,int imw,int spp,bool pxil, const std::vector<int>& slots,const std::vector<float*>& hb,int bp=-1){
-    int or0=std::max(y0,strip_first_row),or1=std::min(y0+cur_h-1,strip_first_row+strip_rows-1);
+    int or0=(std::max)(y0,strip_first_row),or1=(std::min)(y0+cur_h-1,strip_first_row+strip_rows-1);
     if(or0>or1)return;
     for(int row=or0;row<=or1;row++){
         int local_row=row-strip_first_row, chunk_row=row-y0;
@@ -621,14 +638,25 @@ struct RasterResult {
         size_t sz=byte_count();
         data=new(std::nothrow)float[pixel_count()];
         if(!data){
+#ifdef _WIN32
+            char tmp_dir[MAX_PATH];
+            GetTempPathA(MAX_PATH, tmp_dir);
+            char fname[MAX_PATH];
+            GetTempFileNameA(tmp_dir, "cur", 0, fname);
+            int fd;
+            _sopen_s(&fd, fname, _O_RDWR | _O_CREAT | _O_BINARY, _SH_DENYNO, _S_IREAD | _S_IWRITE);
+            if(fd>=0){ _chsize(fd, (long)sz); _close(fd); }
+            spill_path = fname; spilled = true;
+#else
             char tmp[]="/dev/shm/curaster_XXXXXX.bin";
             int fd=mkstemps(tmp,4);
             if(fd<0){strcpy(tmp,"/tmp/curaster_XXXXXX.bin");fd=mkstemps(tmp,4);}
             if(fd<0)throw std::runtime_error("Cannot allocate RasterResult: no RAM and no tmpfs");
             ftruncate(fd,(off_t)sz);close(fd);
+            spill_path=tmp; spilled=true;
+#endif
             data=(float*)malloc(sz);
             if(!data)throw std::runtime_error("Cannot allocate "+std::to_string(sz)+" bytes for result");
-            spill_path=tmp; spilled=true;
         }
         memset(data,0,sz);
     }
@@ -694,9 +722,9 @@ static void run_engine(
 
     int ckhgt;
     if(using_s3&&s3_is_tiled){
-        int tdc=(int)td,tc2=std::max(kNumThreads*2,tdc),trpc=std::max(1,tdc/tc2);
+        int tdc=(int)td,tc2=(std::max)(kNumThreads*2,tdc),trpc=(std::max)(1,tdc/tc2);
         ckhgt=trpc*fi.by;
-        if(max_rows>0&&ckhgt>max_rows)ckhgt=std::max(fi.by,(max_rows/fi.by)*fi.by);
+        if(max_rows>0&&ckhgt>max_rows)ckhgt=(std::max)(fi.by,(max_rows/fi.by)*fi.by);
         if(ckhgt<fi.by)ckhgt=fi.by;
     } else if(using_s3&&!s3_is_tiled){
         int rps=(int)s3_strip_idx.rows_per_strip;
@@ -746,13 +774,13 @@ static void run_engine(
 
     #pragma omp parallel for schedule(dynamic,1)
     for(int chunk=0;chunk<num_chunks;chunk++){
-        int tid=omp_get_thread_num(), y0=chunk*ckhgt, cur_h=std::min(ckhgt,fi.height-y0);
+        int tid=omp_get_thread_num(), y0=chunk*ckhgt, cur_h=(std::min)(ckhgt,fi.height-y0);
         size_t pixels=(size_t)fi.width*cur_h;
         ThreadBufs& buf=pool[tid];
         memset(buf.h_master,0,band_bytes*nb);
 
         if(!using_s3){
-            if(chunk+2<num_chunks){int ay=(chunk+2)*ckhgt,ah=std::min(ckhgt,fi.height-ay);
+            if(chunk+2<num_chunks){int ay=(chunk+2)*ckhgt,ah=(std::min)(ckhgt,fi.height-ay);
                 (void)container.in_datasets[tid]->AdviseRead(0,ay,fi.width,ah,fi.width,ah,GDT_Float32,0,nullptr,nullptr);}
             if(pxil) (void)container.in_datasets[tid]->RasterIO(GF_Read,0,y0,fi.width,cur_h,buf.h_master,fi.width,cur_h,GDT_Float32,(int)band_map.size(),band_map.data(),sizeof(float),(size_t)fi.width*sizeof(float),band_bytes,nullptr);
             else for(int b=0;b<nb;b++) (void)container.bands[tid][b]->RasterIO(GF_Read,0,y0,fi.width,cur_h,buf.h_bands[b],fi.width,cur_h,GDT_Float32,0,0);
@@ -790,7 +818,7 @@ static void run_engine(
                 int sr_j,bp_j;
                 if(pxil){sr_j=(int)job.idx;bp_j=-1;}
                 else{sr_j=(int)(job.idx%(size_t)s3_strip_idx.strips_per_band);bp_j=(int)(job.idx/(size_t)s3_strip_idx.strips_per_band);}
-                int sfr=sr_j*rps, srows=std::min(rps,fi.height-sfr);
+                int sfr=sr_j*rps, srows=(std::min)(rps,fi.height-sfr);
                 size_t vpr=pxil?(size_t)fi.width*fi.spp:(size_t)fi.width;
                 size_t exp=(size_t)fi.width*srows*(pxil?fi.spp:1)*bps;
                 auto raw=decomp(job.data,comp,exp); if(raw.empty())continue;
@@ -803,7 +831,6 @@ static void run_engine(
             }
         }
 
-        // --- C++ LAUNCHES THE GPU KERNEL VIA THE BRIDGE HEADER ---
         launch_raster_algebra(d_prog, (int)insts.size(), buf.d_band_ptrs, buf.d_out, pixels, buf.stream);
         cudaCheck(cudaStreamSynchronize(buf.stream));
 
@@ -879,11 +906,19 @@ void write_s3_output(std::shared_ptr<RasterResult> res,const std::string& s3_pat
     auto loc=parse_s3_loc(s3_path);
     if(loc.bucket.empty()||loc.key.empty())throw std::runtime_error("Invalid S3 path: "+s3_path);
 
+#ifdef _WIN32
+    char tmp_dir[MAX_PATH];
+    GetTempPathA(MAX_PATH, tmp_dir);
+    char fname[MAX_PATH];
+    GetTempFileNameA(tmp_dir, "cur", 0, fname);
+    std::string tmp_path = fname;
+#else
     char tmp[]="/dev/shm/curaster_out_XXXXXX.tif"; int fd=mkstemps(tmp,4);
     if(fd<0){strcpy(tmp,"/tmp/curaster_out_XXXXXX.tif");fd=mkstemps(tmp,4);}
     if(fd<0)throw std::runtime_error("Cannot create temp file for S3 upload");
     close(fd);
     std::string tmp_path=tmp;
+#endif
 
     write_local(res,tmp_path);
     try{
