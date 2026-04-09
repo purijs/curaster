@@ -1,41 +1,56 @@
 cmake_minimum_required(VERSION 3.18...3.28)
 project(curaster_project LANGUAGES CXX CUDA)
 
-find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
-find_package(pybind11 CONFIG REQUIRED)
+find_package(Python     COMPONENTS Interpreter Development.Module REQUIRED)
+find_package(pybind11   CONFIG REQUIRED)
+find_package(GDAL       REQUIRED)
+find_package(OpenMP     COMPONENTS CXX REQUIRED)
+find_package(CURL       REQUIRED)
+find_package(OpenSSL    REQUIRED)
+find_package(ZLIB       REQUIRED)
 
-find_package(GDAL REQUIRED)
-find_package(OpenMP REQUIRED)
-
-set(CMAKE_CUDA_RUNTIME_LIBRARY Static)
-set(CMAKE_CUDA_ARCHITECTURES "75;80;86;89;90")
-
-pybind11_add_module(curaster MODULE src/raster.cu)
-
-if(WIN32)
-    target_compile_options(curaster PRIVATE 
-        $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math;-Xptxas;-O3;-Xcompiler=/openmp>
-    )
-else()
-    target_compile_options(curaster PRIVATE 
-        $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math;-Xptxas;-O3;-Xcompiler=-fopenmp>
-    )
+find_library(ZSTD_LIBRARY  NAMES zstd REQUIRED)
+find_path   (ZSTD_INCLUDE  NAMES zstd.h REQUIRED)
+if(NOT TARGET ZSTD::ZSTD)
+    add_library(ZSTD::ZSTD UNKNOWN IMPORTED)
+    set_target_properties(ZSTD::ZSTD PROPERTIES
+        IMPORTED_LOCATION             "${ZSTD_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${ZSTD_INCLUDE}")
 endif()
 
-target_link_libraries(curaster PRIVATE GDAL::GDAL OpenMP::OpenMP_CXX)
+set(CMAKE_CUDA_RUNTIME_LIBRARY Static)
+set(CMAKE_CUDA_ARCHITECTURES   "75;80;86;89;90")
 
-if(TARGET OpenMP::OpenMP_CUDA)
-    target_link_libraries(curaster PRIVATE OpenMP::OpenMP_CUDA)
+add_library(gpu_math STATIC src/gpu.cu)
+set_target_properties(gpu_math PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+target_compile_options(gpu_math PRIVATE 
+    $<$<COMPILE_LANGUAGE:CUDA>: -O3 --use_fast_math -Xptxas=-O3 >
+)
+
+pybind11_add_module(curaster src/cpu.cpp)
+target_include_directories(curaster PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+
+target_compile_options(curaster PRIVATE
+    # If Windows MSVC: use /O2 and AVX2
+    $<$<COMPILE_LANGUAGE:CXX>:$<$<CXX_COMPILER_ID:MSVC>:/O2;/arch:AVX2>>
+    
+    # If Linux GCC/Clang: use -O3 and Haswell
+    $<$<COMPILE_LANGUAGE:CXX>:$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-O3;-march=haswell>>
+)
+
+target_link_libraries(curaster PRIVATE
+    gpu_math
+    GDAL::GDAL
+    CURL::libcurl
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    ZSTD::ZSTD
+    ZLIB::ZLIB
+)
+
+if(TARGET OpenMP::OpenMP_CXX)
+    target_link_libraries(curaster PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
 install(TARGETS curaster DESTINATION .)
-
-if(UNIX)
-    # Ubuntu Docker paths
-    install(DIRECTORY /usr/share/proj/ DESTINATION proj_data)
-    install(DIRECTORY /usr/share/gdal/ DESTINATION gdal_data)
-elseif(WIN32)
-    # Windows Conda paths
-    install(DIRECTORY $ENV{CONDA_PREFIX}/Library/share/proj/ DESTINATION proj_data)
-    install(DIRECTORY $ENV{CONDA_PREFIX}/Library/share/gdal/ DESTINATION gdal_data)
-endif()
