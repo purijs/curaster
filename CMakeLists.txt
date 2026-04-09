@@ -4,9 +4,10 @@ project(curaster_project LANGUAGES CXX CUDA)
 find_package(Python     COMPONENTS Interpreter Development.Module REQUIRED)
 find_package(pybind11   CONFIG REQUIRED)
 find_package(GDAL       REQUIRED)
-find_package(OpenMP COMPONENTS CXX REQUIRED)
+find_package(OpenMP     COMPONENTS CXX REQUIRED)
 find_package(CURL       REQUIRED)
 find_package(OpenSSL    REQUIRED)
+find_package(ZLIB       REQUIRED)
 
 find_library(ZSTD_LIBRARY  NAMES zstd REQUIRED)
 find_path   (ZSTD_INCLUDE  NAMES zstd.h REQUIRED)
@@ -31,7 +32,11 @@ pybind11_add_module(curaster src/cpu.cpp)
 target_include_directories(curaster PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 
 target_compile_options(curaster PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>: -O3 -fopenmp -march=haswell >
+    # If Windows MSVC: use /O2 and AVX2
+    $<$<COMPILE_LANGUAGE:CXX>:$<$<CXX_COMPILER_ID:MSVC>:/O2;/arch:AVX2>>
+    
+    # If Linux GCC/Clang: use -O3 and Haswell
+    $<$<COMPILE_LANGUAGE:CXX>:$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-O3;-march=haswell>>
 )
 
 target_link_libraries(curaster PRIVATE
@@ -41,7 +46,7 @@ target_link_libraries(curaster PRIVATE
     OpenSSL::SSL
     OpenSSL::Crypto
     ZSTD::ZSTD
-    z
+    ZLIB::ZLIB
 )
 
 if(TARGET OpenMP::OpenMP_CXX)
