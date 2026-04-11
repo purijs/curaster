@@ -12,25 +12,41 @@ jobs:
   build-wheels:
     name: Build Linux Wheels
     runs-on: ubuntu-latest
-    container: nvidia/cuda:12.4.1-devel-ubuntu22.04 
+    container: nvidia/cuda:12.5.1-devel-ubuntu22.04
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
 
     steps:
-      - name: Install System Dependencies & Deadsnakes
+      - name: Install System Dependencies
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           apt-get update
-          apt-get install -y software-properties-common gdal-bin libgdal-dev cmake git build-essential patchelf libomp-dev libssl-dev libcurl4-openssl-dev
-          
+          apt-get install -y \
+            software-properties-common \
+            gdal-bin \
+            libgdal-dev \
+            cmake \
+            git \
+            build-essential \
+            patchelf \
+            libomp-dev \
+            libssl-dev \
+            libcurl4-openssl-dev \
+            libzstd-dev \
+            zlib1g-dev
+
           add-apt-repository ppa:deadsnakes/ppa -y
           apt-get update
-          
-          apt-get install -y python${{ matrix.python-version }} python${{ matrix.python-version }}-dev python${{ matrix.python-version }}-venv
 
-      - name: Checkout repository
+          apt-get install -y \
+            python${{ matrix.python-version }} \
+            python${{ matrix.python-version }}-dev \
+            python${{ matrix.python-version }}-venv
+
+      - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -39,11 +55,11 @@ jobs:
       - name: Fix Git Permissions for setuptools_scm
         run: git config --global --add safe.directory '*'
 
-      - name: Create Virtual Environment and Install Build Deps
+      - name: Create Virtual Environment and Install Build Dependencies
         run: |
           python${{ matrix.python-version }} -m venv /venv
           . /venv/bin/activate
-          
+
           python -m pip install --upgrade pip
           python -m pip install build auditwheel pybind11 scikit-build-core
 
@@ -52,18 +68,21 @@ jobs:
           . /venv/bin/activate
           python -m build --wheel
 
-      - name: Bundle GDAL into the Wheel (Exclude CUDA Runtime)
+      - name: Bundle GDAL into Wheel (Exclude CUDA Runtime)
         run: |
           . /venv/bin/activate
-          auditwheel repair dist/*.whl --plat manylinux_2_35_x86_64 --exclude libcudart.so.12 -w wheelhouse/
+          auditwheel repair dist/*.whl \
+            --plat manylinux_2_35_x86_64 \
+            --exclude libcudart.so.12 \
+            -w wheelhouse/
 
-      - name: Smoke Test the Wheel
+      - name: Smoke Test
         run: |
           . /venv/bin/activate
           pip install wheelhouse/*.whl
           python -c "import curaster; print('Linux smoke test passed!')"
 
-      - name: Upload Wheel as Artifact
+      - name: Upload Wheel Artifact
         uses: actions/upload-artifact@v4
         with:
           name: curaster-wheel-linux-${{ matrix.python-version }}
@@ -73,11 +92,12 @@ jobs:
     name: Build Windows Wheels
     runs-on: windows-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
 
     steps:
-      - name: Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -89,9 +109,9 @@ jobs:
       - name: Setup CUDA Toolkit
         uses: Jimver/cuda-toolkit@v0.2.17
         with:
-          cuda: '12.4.1'
+          cuda: '12.5.1'
 
-      - name: Setup Conda Environment (For GDAL)
+      - name: Setup Conda Environment (for GDAL)
         uses: conda-incubator/setup-miniconda@v3
         with:
           miniforge-version: latest
@@ -102,29 +122,32 @@ jobs:
       - name: Install Build Dependencies and GDAL
         shell: pwsh
         run: |
-          conda install -y -c conda-forge gdal delvewheel
+          conda install -y -c conda-forge gdal zstd delvewheel
           python -m pip install build pybind11 scikit-build-core setuptools_scm ninja
 
       - name: Build Python Wheel
         shell: pwsh
         run: |
-          $env:CMAKE_GENERATOR = "Visual Studio 17 2022"
-          $env:CMAKE_PREFIX_PATH = "$env:CONDA_PREFIX\Library"
+          $env:CMAKE_GENERATOR    = "Visual Studio 17 2022"
+          $env:CMAKE_PREFIX_PATH  = "$env:CONDA_PREFIX\Library"
           $env:CMAKE_ARGS = "-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF -DPYBIND11_LTO_CXX_FLAGS=''"
           python -m build --wheel --no-isolation
 
-      - name: Bundle GDAL into the Wheel (Delvewheel)
+      - name: Bundle Dependencies into Wheel (Exclude CUDA Runtime)
         shell: pwsh
         run: |
-          delvewheel repair dist/*.whl -w wheelhouse/ --add-path "$env:CONDA_PREFIX\Library\bin" --no-dll "cudart64_12.dll;nvcuda.dll"
+          delvewheel repair dist/*.whl `
+            -w wheelhouse/ `
+            --add-path "$env:CONDA_PREFIX\Library\bin" `
+            --no-dll "cudart64_12.dll;nvcuda.dll"
 
-      - name: Smoke Test the Wheel
+      - name: Smoke Test
         shell: pwsh
         run: |
           pip install (Get-ChildItem wheelhouse\*.whl)[0].FullName
           python -c "import curaster; print('Windows smoke test passed!')"
 
-      - name: Upload Wheel as Artifact
+      - name: Upload Wheel Artifact
         uses: actions/upload-artifact@v4
         with:
           name: curaster-wheel-windows-${{ matrix.python-version }}
@@ -132,23 +155,23 @@ jobs:
 
   publish-to-pypi:
     name: Publish to PyPI
-    needs: [build-wheels, build-wheels-windows] 
+    needs: [build-wheels, build-wheels-windows]
     if: github.event_name == 'release' && github.event.action == 'published'
     runs-on: ubuntu-latest
-    
+
     permissions:
       id-token: write
       contents: read
-      
+
     steps:
-      - name: Download all wheels
+      - name: Download All Wheels
         uses: actions/download-artifact@v4
         with:
           pattern: curaster-wheel-*
           path: dist
           merge-multiple: true
 
-      - name: Publish package to PyPI
+      - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
