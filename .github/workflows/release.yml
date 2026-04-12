@@ -59,7 +59,7 @@ jobs:
         run: |
           python${{ matrix.python-version }} -m venv /venv
           . /venv/bin/activate
-
+          
           python -m pip install --upgrade pip
           python -m pip install build auditwheel pybind11 scikit-build-core
 
@@ -111,13 +111,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA
-          key: cuda-12.5.1-${{ runner.os }}
+          key: cuda-12.4.1-${{ runner.os }}
 
       - name: Install CUDA Toolkit (cache miss only)
         if: steps.cuda-cache.outputs.cache-hit != 'true'
         uses: Jimver/cuda-toolkit@v0.2.17
         with:
-          cuda: '12.5.1'
+          cuda: '12.4.1'
           method: 'network'
           sub-packages: '["cuda_nvcc", "cuda_cudart", "cuda_cccl", "visual_studio_integration"]'
 
@@ -125,9 +125,9 @@ jobs:
         if: steps.cuda-cache.outputs.cache-hit == 'true'
         shell: pwsh
         run: |
-          $cudaRoot = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5"
+          $cudaRoot = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4"
           echo "CUDA_PATH=$cudaRoot"        | Out-File $env:GITHUB_ENV  -Append
-          echo "CUDA_PATH_V12_5=$cudaRoot" | Out-File $env:GITHUB_ENV  -Append
+          echo "CUDA_PATH_V12_4=$cudaRoot"  | Out-File $env:GITHUB_ENV  -Append
           echo "$cudaRoot\bin"              | Out-File $env:GITHUB_PATH -Append
           echo "$cudaRoot\libnvvp"          | Out-File $env:GITHUB_PATH -Append
 

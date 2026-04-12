@@ -44,4 +44,6 @@
 *.tif
 *.tiff
 
+*.json
+
 build/
