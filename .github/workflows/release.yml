@@ -23,7 +23,7 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           apt-get update
-          apt-get install -y software-properties-common gdal-bin libgdal-dev cmake git build-essential patchelf libomp-dev libssl-dev libcurl4-openssl-dev
+          apt-get install -y software-properties-common gdal-bin libgdal-dev cmake git build-essential patchelf libomp-dev libssl-dev libcurl4-openssl-dev libzstd-dev zlib1g-dev
           
           add-apt-repository ppa:deadsnakes/ppa -y
           apt-get update

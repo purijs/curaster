@@ -44,4 +44,7 @@
 *.tif
 *.tiff
 
+*.json
+.DS_Store
+
 build/
