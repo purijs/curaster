@@ -101,7 +101,11 @@ std::string build_s3_request_url(const S3Loc&       location,
     auto now         = std::chrono::system_clock::now();
     auto time_t_now  = std::chrono::system_clock::to_time_t(now);
     struct tm utc_time{};
+#ifdef _WIN32
+    gmtime_s(&utc_time, &time_t_now);
+#else
     gmtime_r(&time_t_now, &utc_time);
+#endif
 
     char date8[9];   // "YYYYMMDD"
     char dt16[17];   // "YYYYMMDDTHHmmSSZ"

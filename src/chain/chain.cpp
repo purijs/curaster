@@ -13,6 +13,7 @@
 
 #include "gdal_priv.h"
 #include "cpl_vsi.h"
+#include "cpl_conv.h"
 
 #include "../../include/pipeline.h"
 #include "../../include/types.h"
@@ -204,26 +205,25 @@ void Chain::save_s3(const std::string& s3_path, bool verbose) {
     }
 
     // Write to a temp file then copy to S3 via CPLCopyFile.
-    char tmp_path[] = "/tmp/curaster_XXXXXX.tif";
-    int  fd = mkstemps(tmp_path, 4);
-    if (fd < 0) {
-        throw std::runtime_error("Cannot create temporary file for S3 upload.");
-    }
-    close(fd);
+    const char* cpl_tmp = CPLGenerateTempFilename("curaster");
+    std::string tmp_path = std::string(cpl_tmp) + ".tif";
 
     GDALDataset* tmp_ds = create_output_dataset(tmp_path, result->file_info);
+    if (!tmp_ds) {
+        throw std::runtime_error("Cannot create temporary file for S3 upload.");
+    }
     (void)tmp_ds->GetRasterBand(1)->RasterIO(
         GF_Write, 0, 0, result->width, result->height,
         result->data.data(), result->width, result->height,
         GDT_Float32, 0, 0);
     GDALClose(tmp_ds);
 
-    if (CPLCopyFile(s3_path.c_str(), tmp_path) != 0) {
-        unlink(tmp_path);
+    if (CPLCopyFile(s3_path.c_str(), tmp_path.c_str()) != 0) {
+        VSIUnlink(tmp_path.c_str());
         throw std::runtime_error(
             "S3 upload failed. Ensure the path starts with /vsis3/ and AWS credentials are valid.");
     }
-    unlink(tmp_path);
+    VSIUnlink(tmp_path.c_str());
 }
 
 std::shared_ptr<RasterResult> Chain::to_memory(bool verbose) {

@@ -72,7 +72,7 @@ void s3_fetch_tiles(const S3Loc&               location,
                             && job.byte_offset <= merged_requests.back().last_byte + merge_gap_bytes;
 
         if (merge_with_last) {
-            merged_requests.back().last_byte = std::max(merged_requests.back().last_byte, job_end);
+            merged_requests.back().last_byte = (std::max)(merged_requests.back().last_byte, job_end);
             merged_requests.back().job_indices.push_back(job_index);
         } else {
             MergedRangeRequest new_request;

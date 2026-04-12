@@ -16,7 +16,11 @@
 #include <vector>
 
 #include <omp.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
 
 #include "gdal_priv.h"
 #include "cpl_progress.h"
@@ -38,9 +42,16 @@ size_t g_pinned_budget = 0;
 // ─── RAM budget ───────────────────────────────────────────────────────────────
 
 size_t get_available_ram() {
+#ifdef _WIN32
+    MEMORYSTATUSEX status;
+    status.dwLength = sizeof(status);
+    GlobalMemoryStatusEx(&status);
+    return static_cast<size_t>(status.ullAvailPhys);
+#else
     size_t available_pages = static_cast<size_t>(sysconf(_SC_AVPHYS_PAGES));
     size_t page_size       = static_cast<size_t>(sysconf(_SC_PAGE_SIZE));
     return available_pages * page_size;
+#endif
 }
 
 void init_ram_budget() {
