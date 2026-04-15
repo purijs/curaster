@@ -1,102 +1,65 @@
-/**
- * @file thread_buffers.h
- * @brief Per-thread GPU/CPU buffer management for the curaster pipeline.
- *
- * Each OMP worker thread owns one ThreadBufs instance holding:
- *  - Pinned host memory for band data and output (accessible at zero-copy speed)
- *  - Matching device pointers obtained via cudaHostGetDevicePointer
- *  - Optional polygon-clip span tables
- *  - Warp (reprojection) resources — source canvas, textures, coarse grid
- *
- * Allocation is split into two phases:
- *  1. alloc()       — core algebra / mask buffers (always allocated)
- *  2. alloc_warp()  — reprojection canvas + texture resources (warp path only)
- *
- * Call free_all() once processing is complete to release all resources.
- */
 #pragma once
 
 #include <vector>
 #include <cuda_runtime.h>
-#include "raster_core.h"  // GpuSpanRow, WARP_GRID_WIDTH/HEIGHT
-#include "types.h"        // ResampleMethod
-#include "cuda_utils.h"   // CUDA_CHECK
+#include "raster_core.h"
+#include "types.h"
+#include "cuda_utils.h"
 
-// ─── Per-thread GPU buffer pool ───────────────────────────────────────────────
 struct ThreadBufs {
 
-    // ── Core algebra buffers ──────────────────────────────────────────────────
-
-    /// Contiguous pinned allocation that backs all per-band host slices.
     float* h_pinned_master = nullptr;
-
-    /// Per-band host pointers into h_pinned_master (one slice per band slot).
     std::vector<float*> h_bands;
-
-    /// Per-band device pointers obtained via cudaHostGetDevicePointer.
     std::vector<float*> d_bands;
-
-    /// Pinned host output buffer — one float per pixel in the current chunk.
-    float* h_output = nullptr;
-
-    /// Zero-copy device pointer for h_output.
-    float* d_output = nullptr;
-
-    /// Device-side array of device-band pointers, passed directly to kernels.
+    float* h_output   = nullptr;
+    float* d_output   = nullptr;
     float** d_band_ptrs = nullptr;
 
-    // ── Polygon clip span buffers ─────────────────────────────────────────────
-    /// Pinned host span table — one GpuSpanRow per row of the current chunk.
     GpuSpanRow* h_clip_spans = nullptr;
-
-    /// Zero-copy device pointer for h_clip_spans.
     GpuSpanRow* d_clip_spans = nullptr;
 
-    // ── CUDA stream ───────────────────────────────────────────────────────────
     cudaStream_t cuda_stream{};
 
-    // ── Warp / reprojection resources (alloc_warp path only) ─────────────────
-    /// Pinned host canvas — all bands laid out contiguously (band-major).
+    // ── Warp / reprojection ───────────────────────────────────────────────────
     float* h_src_canvas = nullptr;
-
-    /// Per-band pointers into h_src_canvas.
     std::vector<float*> h_src_bands;
-
-    /// CUDA arrays backing each source-band texture.
     std::vector<cudaArray_t> src_arrays;
-
-    /// Texture objects for each band (bilinear or nearest, depending on mode).
     std::vector<cudaTextureObject_t> src_texture_objects;
-
-    /// Device array of texture object handles passed to the warp kernel.
     cudaTextureObject_t* d_texture_objects = nullptr;
-
-    /// Device control-point X coordinates for the WARP_GRID_WIDTH×HEIGHT grid.
-    float* d_coarse_x = nullptr;
-
-    /// Device control-point Y coordinates for the WARP_GRID_WIDTH×HEIGHT grid.
-    float* d_coarse_y = nullptr;
-
-    /// Device warp output — layout: [band * warp_max_chunk_pixels + pixel_index].
+    float* d_coarse_x   = nullptr;
+    float* d_coarse_y   = nullptr;
     float* d_warp_output = nullptr;
-
-    /// Device-side per-band pointers into d_warp_output.
     float** d_warp_band_ptrs = nullptr;
-
-    /// Stride (in floats) between band planes in d_warp_output.
     size_t warp_max_chunk_pixels = 0;
+
+    // ── Halo / neighborhood buffers (focal, terrain, texture) ─────────────────
+    float*  h_halo_master         = nullptr;
+    float*  d_halo_device         = nullptr;
+    float*  d_neighborhood_output = nullptr;
+    float** d_neighborhood_band_ptrs = nullptr;
+    size_t  halo_alloc_bytes      = 0;
+    int     neighborhood_num_bands = 0;
+    size_t  neighborhood_max_chunk_pixels = 0;
+
+    // ── Zonal statistics buffers ──────────────────────────────────────────────
+    uint16_t* h_zone_labels  = nullptr;
+    uint16_t* d_zone_labels  = nullptr;
+    int*      d_zone_count   = nullptr;
+    float*    d_zone_sum     = nullptr;
+    float*    d_zone_sum_sq  = nullptr;
+    float*    d_zone_min_buf = nullptr;
+    float*    d_zone_max_buf = nullptr;
+    int       zonal_num_zones = 0;
+
+    // ── Temporal stack buffers ────────────────────────────────────────────────
+    float*  d_stack_output    = nullptr;
+    float** d_stack_band_ptrs = nullptr;
+    int     stack_num_scenes  = 0;
+    size_t  stack_max_pixels  = 0;
 
     // ─────────────────────────────────────────────────────────────────────────
 
-    /**
-     * @brief Allocate core buffers for band data, output, and optional clip spans.
-     *
-     * @param band_byte_size  Bytes required for one band of the current chunk.
-     * @param num_bands       Number of virtual band slots.
-     * @param max_clip_rows   Rows of span data to allocate; 0 = no clip mask.
-     */
     void alloc(size_t band_byte_size, int num_bands, int max_clip_rows = 0) {
-        // Single mapped+write-combining allocation for all band host buffers.
         CUDA_CHECK(cudaHostAlloc(
             &h_pinned_master,
             band_byte_size * num_bands,
@@ -105,7 +68,6 @@ struct ThreadBufs {
 
         CUDA_CHECK(cudaHostAlloc(&h_output, band_byte_size, cudaHostAllocMapped));
 
-        // Slice the pinned master buffer into per-band views.
         h_bands.resize(num_bands);
         d_bands.resize(num_bands);
         for (int band = 0; band < num_bands; ++band) {
@@ -117,7 +79,6 @@ struct ThreadBufs {
             d_bands[band] = device_ptr;
         }
 
-        // Zero-copy device pointer for the output buffer.
         {
             float* device_out = nullptr;
             CUDA_CHECK(cudaHostGetDevicePointer(
@@ -125,13 +86,11 @@ struct ThreadBufs {
             d_output = device_out;
         }
 
-        // Copy device band pointers to GPU memory so kernels can index them.
         CUDA_CHECK(cudaMalloc(&d_band_ptrs, num_bands * sizeof(float*)));
         CUDA_CHECK(cudaMemcpy(
             d_band_ptrs, d_bands.data(),
             num_bands * sizeof(float*), cudaMemcpyHostToDevice));
 
-        // Optional: pinned span table for polygon clip masks.
         if (max_clip_rows > 0) {
             CUDA_CHECK(cudaHostAlloc(
                 &h_clip_spans,
@@ -145,23 +104,11 @@ struct ThreadBufs {
         CUDA_CHECK(cudaStreamCreate(&cuda_stream));
     }
 
-    /**
-     * @brief Allocate reprojection resources (source canvas + textures + coarse grid).
-     *
-     * Must be called after alloc(). Only used on the reprojection code path.
-     *
-     * @param max_canvas_width   Maximum source canvas width in pixels.
-     * @param max_canvas_height  Maximum source canvas height in pixels.
-     * @param max_dst_pixels     Maximum destination pixels per chunk.
-     * @param num_bands          Number of bands.
-     * @param resample_method    Texture filter mode (nearest or bilinear).
-     */
     void alloc_warp(int max_canvas_width, int max_canvas_height,
                     size_t max_dst_pixels, int num_bands,
                     ResampleMethod resample_method) {
         size_t canvas_pixels = static_cast<size_t>(max_canvas_width) * max_canvas_height;
 
-        // Pinned canvas for all bands — read by bind_src_canvas into CUDA arrays.
         CUDA_CHECK(cudaHostAlloc(
             &h_src_canvas,
             canvas_pixels * num_bands * sizeof(float),
@@ -172,7 +119,6 @@ struct ThreadBufs {
             h_src_bands[band] = h_src_canvas + band * canvas_pixels;
         }
 
-        // Create one 2-D CUDA array + texture object per band.
         cudaChannelFormatDesc channel_format = cudaCreateChannelDesc<float>();
         src_arrays.resize(num_bands);
         src_texture_objects.resize(num_bands);
@@ -183,15 +129,15 @@ struct ThreadBufs {
                 max_canvas_width, max_canvas_height));
 
             struct cudaResourceDesc resource_desc{};
-            resource_desc.resType               = cudaResourceTypeArray;
-            resource_desc.res.array.array        = src_arrays[band];
+            resource_desc.resType              = cudaResourceTypeArray;
+            resource_desc.res.array.array       = src_arrays[band];
 
             struct cudaTextureDesc texture_desc{};
-            texture_desc.addressMode[0]  = cudaAddressModeClamp;
-            texture_desc.addressMode[1]  = cudaAddressModeClamp;
-            texture_desc.filterMode      = (resample_method == ResampleMethod::BILINEAR)
-                                               ? cudaFilterModeLinear
-                                               : cudaFilterModePoint;
+            texture_desc.addressMode[0] = cudaAddressModeClamp;
+            texture_desc.addressMode[1] = cudaAddressModeClamp;
+            texture_desc.filterMode     = (resample_method == ResampleMethod::BILINEAR)
+                                              ? cudaFilterModeLinear
+                                              : cudaFilterModePoint;
             texture_desc.readMode        = cudaReadModeElementType;
             texture_desc.normalizedCoords = 0;
 
@@ -199,17 +145,14 @@ struct ThreadBufs {
                 &src_texture_objects[band], &resource_desc, &texture_desc, nullptr));
         }
 
-        // Upload texture handles to device memory for the kernel.
         CUDA_CHECK(cudaMalloc(&d_texture_objects, num_bands * sizeof(cudaTextureObject_t)));
         CUDA_CHECK(cudaMemcpy(
             d_texture_objects, src_texture_objects.data(),
             num_bands * sizeof(cudaTextureObject_t), cudaMemcpyHostToDevice));
 
-        // Coarse warp grid in device memory.
         CUDA_CHECK(cudaMalloc(&d_coarse_x, WARP_GRID_WIDTH * WARP_GRID_HEIGHT * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_coarse_y, WARP_GRID_WIDTH * WARP_GRID_HEIGHT * sizeof(float)));
 
-        // Output buffer for the warp kernel (band-major).
         warp_max_chunk_pixels = max_dst_pixels;
         CUDA_CHECK(cudaMalloc(&d_warp_output, max_dst_pixels * num_bands * sizeof(float)));
 
@@ -224,14 +167,91 @@ struct ThreadBufs {
             num_bands * sizeof(float*), cudaMemcpyHostToDevice));
     }
 
-    /**
-     * @brief Upload source canvas data into CUDA arrays, ready for texture sampling.
-     *
-     * @param num_bands      Number of bands to upload.
-     * @param canvas_width   Actual canvas width for this chunk.
-     * @param canvas_height  Actual canvas height for this chunk.
-     * @param stream         CUDA stream to use for the async memcpy.
-     */
+    void alloc_halo(size_t halo_bytes, int num_out_bands, size_t max_chunk_pixels) {
+        if (halo_bytes == halo_alloc_bytes && num_out_bands == neighborhood_num_bands) {
+            return;
+        }
+        free_halo();
+        CUDA_CHECK(cudaHostAlloc(&h_halo_master, halo_bytes,
+                                 cudaHostAllocMapped | cudaHostAllocWriteCombined));
+        memset(h_halo_master, 0, halo_bytes);
+        CUDA_CHECK(cudaHostGetDevicePointer(
+            reinterpret_cast<void**>(&d_halo_device), h_halo_master, 0));
+
+        CUDA_CHECK(cudaMalloc(&d_neighborhood_output,
+                              max_chunk_pixels * num_out_bands * sizeof(float)));
+
+        std::vector<float*> ptrs(num_out_bands);
+        for (int b = 0; b < num_out_bands; ++b) {
+            ptrs[b] = d_neighborhood_output + static_cast<size_t>(b) * max_chunk_pixels;
+        }
+        CUDA_CHECK(cudaMalloc(&d_neighborhood_band_ptrs, num_out_bands * sizeof(float*)));
+        CUDA_CHECK(cudaMemcpy(d_neighborhood_band_ptrs, ptrs.data(),
+                              num_out_bands * sizeof(float*), cudaMemcpyHostToDevice));
+
+        halo_alloc_bytes          = halo_bytes;
+        neighborhood_num_bands     = num_out_bands;
+        neighborhood_max_chunk_pixels = max_chunk_pixels;
+    }
+
+    void free_halo() {
+        if (h_halo_master)           { cudaFreeHost(h_halo_master); h_halo_master = nullptr; }
+        if (d_neighborhood_output)   { cudaFree(d_neighborhood_output); d_neighborhood_output = nullptr; }
+        if (d_neighborhood_band_ptrs){ cudaFree(d_neighborhood_band_ptrs); d_neighborhood_band_ptrs = nullptr; }
+        d_halo_device = nullptr;
+        halo_alloc_bytes = 0;
+        neighborhood_num_bands = 0;
+    }
+
+    void alloc_zonal(int num_zones, int max_chunk_rows, int width) {
+        if (zonal_num_zones == num_zones) { return; }
+        free_zonal();
+        size_t label_bytes = static_cast<size_t>(width) * max_chunk_rows * sizeof(uint16_t);
+        CUDA_CHECK(cudaHostAlloc(&h_zone_labels, label_bytes, cudaHostAllocMapped));
+        memset(h_zone_labels, 0, label_bytes);
+        CUDA_CHECK(cudaHostGetDevicePointer(
+            reinterpret_cast<void**>(&d_zone_labels), h_zone_labels, 0));
+
+        CUDA_CHECK(cudaMalloc(&d_zone_count,   (num_zones + 1) * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&d_zone_sum,     (num_zones + 1) * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_zone_sum_sq,  (num_zones + 1) * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_zone_min_buf, (num_zones + 1) * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_zone_max_buf, (num_zones + 1) * sizeof(float)));
+        zonal_num_zones = num_zones;
+    }
+
+    void free_zonal() {
+        if (h_zone_labels) { cudaFreeHost(h_zone_labels); h_zone_labels = nullptr; d_zone_labels = nullptr; }
+        if (d_zone_count)   { cudaFree(d_zone_count);   d_zone_count   = nullptr; }
+        if (d_zone_sum)     { cudaFree(d_zone_sum);     d_zone_sum     = nullptr; }
+        if (d_zone_sum_sq)  { cudaFree(d_zone_sum_sq);  d_zone_sum_sq  = nullptr; }
+        if (d_zone_min_buf) { cudaFree(d_zone_min_buf); d_zone_min_buf = nullptr; }
+        if (d_zone_max_buf) { cudaFree(d_zone_max_buf); d_zone_max_buf = nullptr; }
+        zonal_num_zones = 0;
+    }
+
+    void alloc_stack(int num_scenes, size_t max_pixels) {
+        if (stack_num_scenes == num_scenes && stack_max_pixels == max_pixels) { return; }
+        free_stack();
+        CUDA_CHECK(cudaMalloc(&d_stack_output, num_scenes * max_pixels * sizeof(float)));
+        std::vector<float*> ptrs(num_scenes);
+        for (int s = 0; s < num_scenes; ++s) {
+            ptrs[s] = d_stack_output + static_cast<size_t>(s) * max_pixels;
+        }
+        CUDA_CHECK(cudaMalloc(&d_stack_band_ptrs, num_scenes * sizeof(float*)));
+        CUDA_CHECK(cudaMemcpy(d_stack_band_ptrs, ptrs.data(),
+                              num_scenes * sizeof(float*), cudaMemcpyHostToDevice));
+        stack_num_scenes = num_scenes;
+        stack_max_pixels = max_pixels;
+    }
+
+    void free_stack() {
+        if (d_stack_output)    { cudaFree(d_stack_output);    d_stack_output    = nullptr; }
+        if (d_stack_band_ptrs) { cudaFree(d_stack_band_ptrs); d_stack_band_ptrs = nullptr; }
+        stack_num_scenes = 0;
+        stack_max_pixels = 0;
+    }
+
     void bind_src_canvas(int num_bands, int canvas_width, int canvas_height,
                          cudaStream_t stream) {
         size_t row_bytes = static_cast<size_t>(canvas_width) * sizeof(float);
@@ -244,17 +264,14 @@ struct ThreadBufs {
         }
     }
 
-    /// Release all warp resources (textures, arrays, coarse grid, warp output).
     void free_warp() {
         if (!h_src_canvas) { return; }
         cudaFreeHost(h_src_canvas);
         h_src_canvas = nullptr;
-
         for (auto& tex : src_texture_objects) { cudaDestroyTextureObject(tex); }
         for (auto& arr : src_arrays)          { cudaFreeArray(arr); }
         src_texture_objects.clear();
         src_arrays.clear();
-
         cudaFree(d_texture_objects); d_texture_objects = nullptr;
         cudaFree(d_coarse_x);       d_coarse_x        = nullptr;
         cudaFree(d_coarse_y);       d_coarse_y        = nullptr;
@@ -262,13 +279,15 @@ struct ThreadBufs {
         cudaFree(d_warp_band_ptrs); d_warp_band_ptrs  = nullptr;
     }
 
-    /// Release all resources (warp + core buffers + stream).
     void free_all() {
         free_warp();
-        if (h_pinned_master) { cudaFreeHost(h_pinned_master); }
-        if (h_output)        { cudaFreeHost(h_output); }
-        if (d_band_ptrs)     { cudaFree(d_band_ptrs); }
-        if (h_clip_spans)    { cudaFreeHost(h_clip_spans); }
+        free_halo();
+        free_zonal();
+        free_stack();
+        if (h_pinned_master) { cudaFreeHost(h_pinned_master); h_pinned_master = nullptr; }
+        if (h_output)        { cudaFreeHost(h_output);        h_output        = nullptr; }
+        if (d_band_ptrs)     { cudaFree(d_band_ptrs);         d_band_ptrs     = nullptr; }
+        if (h_clip_spans)    { cudaFreeHost(h_clip_spans);    h_clip_spans    = nullptr; }
         cudaStreamDestroy(cuda_stream);
     }
 };

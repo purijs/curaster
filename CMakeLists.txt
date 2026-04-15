@@ -25,7 +25,10 @@ set(CMAKE_CUDA_ARCHITECTURES "75;80;86;89;90")
 
 add_library(gpu_kernels STATIC
     src/gpu/gpu.cu
-    src/gpu/gpu_warp.cu)
+    src/gpu/gpu_warp.cu
+    src/gpu/gpu_focal.cu
+    src/gpu/gpu_glcm.cu
+    src/gpu/gpu_zonal.cu)
 
 set_target_properties(gpu_kernels PROPERTIES
     POSITION_INDEPENDENT_CODE ON)
@@ -54,10 +57,21 @@ pybind11_add_module(curaster
 
     src/clip/clip.cpp
 
+    src/focal/focal.cpp
+
+    src/texture/texture.cpp
+
+    src/zonal/zonal.cpp
+
+    src/stack/stack.cpp
+
     src/reproject/reproject.cpp
 
     src/engine/engine.cpp
     src/engine/engine_reproject.cpp
+    src/engine/engine_focal.cpp
+    src/engine/engine_zonal.cpp
+    src/engine/engine_temporal.cpp
 
     src/chain/chain.cpp
 

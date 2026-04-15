@@ -1,8 +1,3 @@
-/**
- * @file chain.cpp
- * @brief Chain method implementations: pipeline building, context assembly,
- *        and terminal output methods.
- */
 #include "chain.h"
 
 #include <cstring>
@@ -22,8 +17,12 @@
 #include "../tiff/tiff_metadata.h"
 #include "../algebra/algebra_compiler.h"
 #include "../clip/clip.h"
-#include "../reproject/reproject.h"
+#include "../focal/focal.h"
+#include "../texture/texture.h"
 #include "../engine/engine.h"
+#include "../engine/engine_focal.h"
+#include "../engine/engine_zonal.h"
+#include "../reproject/reproject.h"
 
 // ─── Construction ─────────────────────────────────────────────────────────────
 
@@ -55,13 +54,11 @@ FileInfo Chain::get_output_info() const {
 
 // ─── Pipeline context assembly ────────────────────────────────────────────────
 
-/// Build PipelineCtx from the chain's operation list.
 static PipelineCtx build_pipeline_context(const std::vector<ChainOp>& operations,
                                            const FileInfo&              src_info,
                                            const std::string&           input_file) {
     PipelineCtx ctx;
 
-    // Identify reprojection (only one is allowed; use the first found).
     for (const auto& op : operations) {
         if (op.type == ChainOpType::REPROJECT) {
             ctx.has_reproject        = true;
@@ -72,13 +69,13 @@ static PipelineCtx build_pipeline_context(const std::vector<ChainOp>& operations
         }
     }
 
-    // For clip operations, scan-convert against the output CRS grid (after reproejct if any).
     const FileInfo& clip_reference_info = ctx.has_reproject
                                         ? ctx.reproject_output_info
                                         : src_info;
 
     std::vector<int> band_map;
-    bool has_algebra = false;
+    bool has_algebra       = false;
+    bool has_neighborhood  = false;
 
     for (const auto& op : operations) {
         if (op.type == ChainOpType::ALGEBRA) {
@@ -89,13 +86,36 @@ static PipelineCtx build_pipeline_context(const std::vector<ChainOp>& operations
             ctx.has_clip_mask = true;
             parse_polygon_to_spans(op.geojson_str, clip_reference_info, ctx.clip_spans);
         }
+        if (op.type == ChainOpType::FOCAL) {
+            ctx.has_focal   = true;
+            ctx.focal_params = op.focal_params;
+            ctx.focal_num_output_bands = 1;
+            has_neighborhood = true;
+        }
+        if (op.type == ChainOpType::TERRAIN) {
+            ctx.has_terrain    = true;
+            ctx.terrain_params = op.terrain_params;
+            ctx.focal_num_output_bands = op.terrain_params.num_output_bands;
+            has_neighborhood = true;
+        }
+        if (op.type == ChainOpType::TEXTURE) {
+            ctx.has_texture  = true;
+            ctx.glcm_params  = op.glcm_params;
+            ctx.focal_num_output_bands = op.glcm_params.num_output_bands;
+            has_neighborhood = true;
+        }
+        if (op.type == ChainOpType::ZONAL_STATS) {
+            ctx.has_zonal    = true;
+            ctx.zonal_params = op.zonal_params;
+        }
     }
 
-    if (!has_algebra) {
-        throw std::runtime_error("Chain must contain at least one algebra() operation.");
+    if (!has_algebra && !has_neighborhood && !ctx.has_zonal) {
+        throw std::runtime_error("Chain must contain at least one algebra(), focal(), terrain(), texture(), or zonal_stats() operation.");
     }
+
     if (band_map.empty()) {
-        band_map.push_back(0);  // Default: use band 1
+        band_map.push_back(0);
     }
 
     ctx.band_map = band_map;
@@ -135,22 +155,30 @@ void Chain::execute(GDALRasterBand*             output_band,
         };
     }
 
-    run_engine_ex(input_file_, ctx, verbose);
+    if (ctx.has_focal || ctx.has_terrain || ctx.has_texture) {
+        run_engine_focal(input_file_, ctx, verbose);
+    } else if (ctx.has_zonal) {
+        run_engine_zonal(input_file_, ctx, verbose);
+    } else {
+        run_engine_ex(input_file_, ctx, verbose);
+    }
 }
-
-// ─── Builder methods ──────────────────────────────────────────────────────────
 
 std::shared_ptr<Chain> Chain::algebra(const std::string& expression) {
     auto new_chain = std::make_shared<Chain>(*this);
-    new_chain->operations_.push_back(
-        {ChainOpType::ALGEBRA, expression, "", {}, {}, {}});
+    ChainOp op;
+    op.type = ChainOpType::ALGEBRA;
+    op.algebra_expr = expression;
+    new_chain->operations_.push_back(op);
     return new_chain;
 }
 
 std::shared_ptr<Chain> Chain::clip(const std::string& geojson) {
     auto new_chain = std::make_shared<Chain>(*this);
-    new_chain->operations_.push_back(
-        {ChainOpType::CLIP, "", geojson, {}, {}, {}});
+    ChainOp op;
+    op.type = ChainOpType::CLIP;
+    op.geojson_str = geojson;
+    new_chain->operations_.push_back(op);
     return new_chain;
 }
 
@@ -181,10 +209,84 @@ std::shared_ptr<Chain> Chain::reproject(const std::string& target_crs,
     }
 
     auto new_chain = std::make_shared<Chain>(*this);
-    new_chain->operations_.push_back(
-        {ChainOpType::REPROJECT, "", "", {}, {}, rp});
+    ChainOp op;
+    op.type = ChainOpType::REPROJECT;
+    op.reproject_params = rp;
+    new_chain->operations_.push_back(op);
     return new_chain;
 }
+
+std::shared_ptr<Chain> Chain::focal(const std::string& stat,
+                                     int radius,
+                                     const std::string& shape,
+                                     bool clamp_border)
+{
+    FocalParams fp;
+    build_focal_params(fp, stat, radius, shape, clamp_border);
+    auto new_chain = std::make_shared<Chain>(*this);
+    ChainOp op;
+    op.type = ChainOpType::FOCAL;
+    op.focal_params = fp;
+    new_chain->operations_.push_back(op);
+    return new_chain;
+}
+
+std::shared_ptr<Chain> Chain::terrain(const std::vector<std::string>& metrics,
+                                       const std::string& unit,
+                                       double sun_azimuth,
+                                       double sun_altitude,
+                                       const std::string& method)
+{
+    FileInfo src_info = get_file_info(input_file_);
+    TerrainParams tp;
+    build_terrain_params(tp, metrics.empty() ? std::vector<std::string>{"slope"} : metrics,
+                         unit, sun_azimuth, sun_altitude, method, src_info);
+    auto new_chain = std::make_shared<Chain>(*this);
+    ChainOp op;
+    op.type = ChainOpType::TERRAIN;
+    op.terrain_params = tp;
+    new_chain->operations_.push_back(op);
+    return new_chain;
+}
+
+std::shared_ptr<Chain> Chain::texture(const std::vector<std::string>& features,
+                                       int window,
+                                       int levels,
+                                       const std::string& direction_mode,
+                                       bool log_scale,
+                                       float val_min,
+                                       float val_max)
+{
+    GLCMParams gp;
+    build_glcm_params(gp, features, window, levels, direction_mode, log_scale, val_min, val_max);
+    auto new_chain = std::make_shared<Chain>(*this);
+    ChainOp op;
+    op.type = ChainOpType::TEXTURE;
+    op.glcm_params = gp;
+    new_chain->operations_.push_back(op);
+    return new_chain;
+}
+
+std::vector<ZoneResult> Chain::zonal_stats(const std::string& geojson_str,
+                                             const std::vector<std::string>& stats,
+                                             int band,
+                                             bool verbose)
+{
+    auto new_chain = std::make_shared<Chain>(*this);
+    ChainOp op;
+    op.type = ChainOpType::ZONAL_STATS;
+    op.zonal_params.geojson_str = geojson_str;
+    op.zonal_params.stats       = stats;
+    op.zonal_params.band        = band;
+    new_chain->operations_.push_back(op);
+
+    FileInfo    src_info = get_file_info(new_chain->input_file_);
+    PipelineCtx ctx      = build_pipeline_context(new_chain->operations_, src_info,
+                                                   new_chain->input_file_);
+    run_engine_zonal(new_chain->input_file_, ctx, verbose);
+    return ctx.zonal_results;
+}
+
 
 // ─── Terminal methods ─────────────────────────────────────────────────────────
 

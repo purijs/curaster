@@ -9,6 +9,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <cuda_runtime_api.h>
 
 // ─── Warp kernel coarse-grid dimensions ──────────────────────────────────────
@@ -143,3 +144,91 @@ void launch_warp_kernel(
     float                      nodata_value,
     size_t                     max_chunk_pixels,
     cudaStream_t               stream);
+
+// ─── Focal / neighborhood kernel ─────────────────────────────────────────────
+
+void launch_focal_kernel(
+    const float*  d_halo_src,
+    float*        d_output,
+    int           src_width,
+    int           halo_height,
+    int           dst_width,
+    int           dst_height,
+    int           radius,
+    int           stat_id,
+    int           shape_circle,   // 0=square 1=circle
+    cudaStream_t  stream);
+
+// ─── Terrain kernel ───────────────────────────────────────────────────────────
+
+void launch_terrain_kernel(
+    const float*  d_halo_src,
+    float*        d_output,
+    int           src_width,
+    int           halo_height,
+    int           dst_width,
+    int           dst_height,
+    uint32_t      features_mask,
+    float         cell_x,
+    float         cell_y,
+    float         sun_az_rad,
+    float         sun_alt_rad,
+    bool          use_zevenbergen,
+    int           unit_mode,       // 0=degrees 1=radians 2=percent
+    size_t        max_chunk_pixels,
+    cudaStream_t  stream);
+
+// ─── GLCM kernel ──────────────────────────────────────────────────────────────
+
+void launch_glcm_kernel(
+    const float*  d_halo_src,
+    float*        d_output,
+    int           src_width,
+    int           halo_height,
+    int           dst_width,
+    int           dst_height,
+    int           window,
+    int           levels,
+    float         val_min,
+    float         val_max,
+    int           dx,
+    int           dy,
+    int           num_output_features,
+    size_t        max_chunk_pixels,
+    bool          log_scale,
+    cudaStream_t  stream);
+
+void launch_glcm_avg_divide(
+    float*        d_output,
+    int           num_pixels,
+    int           num_features,
+    int           num_dirs,
+    cudaStream_t  stream);
+
+// ─── Zonal reduction kernel ───────────────────────────────────────────────────
+
+void launch_zonal_reduction(
+    const float*    d_values,
+    const uint16_t* d_zone_labels,
+    size_t          num_pixels,
+    int*            d_count,
+    float*          d_sum,
+    float*          d_sum_sq,
+    float*          d_min,
+    float*          d_max,
+    int             num_zones,
+    cudaStream_t    stream);
+
+// ─── Temporal stack kernel ────────────────────────────────────────────────────
+
+void launch_temporal_kernel(
+    const float** d_scene_ptrs,
+    float*        d_output,
+    size_t        num_pixels,
+    int           num_scenes,
+    int           op_id,
+    int           t0_idx,
+    int           t1_idx,
+    const float*  d_time_values,
+    float         denominator,
+    cudaStream_t  stream);
