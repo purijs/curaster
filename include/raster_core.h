@@ -9,6 +9,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <cuda_runtime_api.h>
 
 // ─── Warp kernel coarse-grid dimensions ──────────────────────────────────────

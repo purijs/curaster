@@ -224,7 +224,7 @@ void run_engine_focal(const std::string& input_file, PipelineCtx& ctx, bool verb
         glcm_val_max = static_cast<float>(scan_band->GetMaximum(&has_max_flag));
         if (!has_min_flag || !has_max_flag) {
             double mn, mx;
-            scan_band->ComputeRasterStatistics(FALSE, &mn, &mx,
+            scan_band->ComputeStatistics(FALSE, &mn, &mx,
                                                 nullptr, nullptr, nullptr, nullptr);
             glcm_val_min = static_cast<float>(mn);
             glcm_val_max = static_cast<float>(mx);

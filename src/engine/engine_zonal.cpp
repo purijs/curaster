@@ -117,7 +117,7 @@ void run_engine_zonal(const std::string& input_file, PipelineCtx& ctx, bool verb
     int num_chunks = (height + chunk_height - 1) / chunk_height;
 
     int band_idx = std::max(1, ctx.zonal_params.band) - 1;
-    band_idx = std::min(band_idx, src_info.num_bands - 1);
+    band_idx = std::min(band_idx, src_info.samples_per_pixel - 1);
 
     // First: count zones from GeoJSON parse
     int num_zones = count_zones_geojson(ctx.zonal_params.geojson_str);

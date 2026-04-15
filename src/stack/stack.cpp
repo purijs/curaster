@@ -119,7 +119,7 @@ std::shared_ptr<Chain> StackChain::temporal(const std::string& op_str,
         float sum_t = 0, sum_t2 = 0;
         for (float t : tv) { sum_t += t; sum_t2 += t * t; }
         float denom = n * sum_t2 - sum_t * sum_t;
-        tp.denominator  = (std::fabsf(denom) > 1e-10f) ? denom : 1.f;
+        tp.denominator  = (std::fabs(denom) > 1e-10f) ? denom : 1.f;
         tp.time_values  = tv; // store the filled version
     }
 
