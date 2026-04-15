@@ -1,3 +1,20 @@
+/**
+ * @file bindings.cpp
+ * @brief pybind11 Python module definition for curaster.
+ *
+ * Exposes:
+ *  - curaster.open(path)           → Chain
+ *  - Chain.algebra(expr)           → Chain
+ *  - Chain.clip(geojson)           → Chain
+ *  - Chain.reproject(crs, ...)     → Chain
+ *  - Chain.get_info()              → dict
+ *  - Chain.save_local(path)
+ *  - Chain.save_s3(s3_path)
+ *  - Chain.to_memory()             → RasterResult
+ *  - Chain.iter_begin(buf_chunks)  → ChunkQueue
+ *  - RasterResult.width / .height / .proj / .data()  → numpy array
+ *  - ChunkQueue.next()             → dict | None
+ */
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>

@@ -596,7 +596,198 @@ All scenes in the stack must have the same width, height, and CRS. Use `.reproje
 
 ---
 
-## Building from Source
+| Parameter | Type | Description |
+|---|---|---|
+| `path` | `str` | Local file path or S3 URI (`s3://` or `/vsis3/`) |
+
+**Returns** `Chain`
+
+---
+
+### `Chain.algebra(expression)`
+
+Append a band-math operation. Bands are referenced as `B1`, `B2`, … (1-indexed).
+
+```python
+chain.algebra("(B5 - B4) / (B5 + B4)")      # NDVI
+chain.algebra("B1 * 0.0001")                  # Scale factor
+chain.algebra("(B3 + B2 + B1) / 3")          # Visible mean
+chain.algebra("B4 > 0.3")                     # Boolean mask (1.0 or 0.0)
+chain.algebra("(B4 > 0.2) * B4")             # Apply mask conditionally
+```
+
+Supported operators: `+  -  *  /  >  <  >=  <=  ==  !=`
+
+| Parameter | Type | Description |
+|---|---|---|
+| `expression` | `str` | Band-math expression string |
+
+**Returns** a new `Chain` (original is unmodified)
+
+---
+
+### `Chain.clip(geojson)`
+
+Clip the output to a polygon. Pixels outside the polygon are set to zero.
+
+```python
+import json
+
+aoi = json.dumps({
+    "type": "Polygon",
+    "coordinates": [[[10.0, 52.0], [11.0, 52.0], [11.0, 53.0], [10.0, 53.0], [10.0, 52.0]]]
+})
+
+chain.algebra("(B5 - B4) / (B5 + B4)").clip(aoi)
+```
+
+| Parameter | Type | Description |
+|---|---|---|
+| `geojson` | `str` | GeoJSON string — `Polygon` or `MultiPolygon` |
+
+**Returns** a new `Chain`
+
+---
+
+### `Chain.reproject(target_crs, ...)`
+
+Reproject the output to a different coordinate reference system.
+
+```python
+chain.reproject("EPSG:4326")                             # Auto pixel size
+chain.reproject("EPSG:3857", res_x=10.0, res_y=10.0)   # Fixed 10 m resolution
+chain.reproject("EPSG:4326", resampling="nearest")      # Nearest-neighbour
+
+# Fixed output extent (in target CRS units)
+chain.reproject(
+    "EPSG:4326",
+    res_x=0.0001, res_y=0.0001,
+    te_xmin=9.5, te_ymin=51.5,
+    te_xmax=10.5, te_ymax=52.5
+)
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `target_crs` | `str` | required | Any CRS string GDAL understands (EPSG code, WKT, PROJ string) |
+| `res_x` | `float` | `0` | Output pixel width in target CRS units (0 = auto-derive) |
+| `res_y` | `float` | `0` | Output pixel height in target CRS units (0 = auto-derive) |
+| `resampling` | `str` | `"bilinear"` | `"bilinear"` or `"nearest"` |
+| `nodata` | `float` | `-9999.0` | Fill value for pixels outside the source extent |
+| `te_xmin` | `float` | `0` | Output extent — min X in target CRS |
+| `te_ymin` | `float` | `0` | Output extent — min Y in target CRS |
+| `te_xmax` | `float` | `0` | Output extent — max X in target CRS |
+| `te_ymax` | `float` | `0` | Output extent — max Y in target CRS |
+
+**Returns** a new `Chain`
+
+---
+
+### `Chain.get_info()`
+
+Return metadata for the output raster without executing the pipeline.
+
+```python
+info = curaster.open("scene.tif").reproject("EPSG:4326").get_info()
+print(info)
+# {'width': 4096, 'height': 3072, 'geotransform': [...], 'crs': 'GEOGCS[...]'}
+```
+
+**Returns** `dict` with keys `width`, `height`, `geotransform` (list of 6 floats), `crs` (WKT string)
+
+---
+
+### `Chain.save_local(path, verbose=False)`
+
+Execute the pipeline and write a Float32 tiled GeoTIFF to disk.
+
+```python
+curaster.open("scene.tif") \
+    .algebra("(B5 - B4) / (B5 + B4)") \
+    .save_local("ndvi.tif", verbose=True)
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `path` | `str` | required | Output file path |
+| `verbose` | `bool` | `False` | Print a GDAL-style progress bar |
+
+---
+
+### `Chain.save_s3(s3_path, verbose=False)`
+
+Execute the pipeline and upload the result directly to S3.  
+AWS credentials must be set via environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION`).
+
+```python
+curaster.open("scene.tif") \
+    .algebra("(B5 - B4) / (B5 + B4)") \
+    .save_s3("/vsis3/my-bucket/output/ndvi.tif")
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `s3_path` | `str` | required | Upload destination (`/vsis3/bucket/key`) |
+| `verbose` | `bool` | `False` | Print a progress bar |
+
+---
+
+### `Chain.to_memory(verbose=False)`
+
+Execute and return all pixels as a `RasterResult` object. Raises `RuntimeError` if the result would exceed 75 % of available RAM — use `iter_begin()` for large rasters.
+
+```python
+result = curaster.open("scene.tif") \
+    .algebra("B1 * 0.0001") \
+    .to_memory()
+
+import numpy as np
+arr = result.data()          # numpy array, shape (height, width), dtype float32
+print(arr.mean(), arr.std())
+print(result.width, result.height, result.proj)
+```
+
+**Returns** `RasterResult`
+
+---
+
+### `Chain.iter_begin(buf_chunks=4)`
+
+Start background execution and return a `ChunkQueue` for memory-efficient streaming. Each chunk covers a horizontal strip of the output.
+
+```python
+queue = curaster.open("huge_scene.tif") \
+    .algebra("(B5 - B4) / (B5 + B4)") \
+    .iter_begin(buf_chunks=8)
+
+while True:
+    chunk = queue.next()
+    if chunk is None:
+        break
+    # chunk = {'y_offset': int, 'width': int, 'height': int, 'data': np.ndarray}
+    process(chunk["data"], chunk["y_offset"])
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `buf_chunks` | `int` | `4` | Number of completed chunks to buffer before backpressure |
+
+**Returns** `ChunkQueue`
+
+---
+
+### `RasterResult`
+
+Returned by `to_memory()`.
+
+| Attribute / Method | Type | Description |
+|---|---|---|
+| `.width` | `int` | Output width in pixels |
+| `.height` | `int` | Output height in pixels |
+| `.proj` | `str` | WKT coordinate reference system |
+| `.data()` | `np.ndarray` | `float32` array of shape `(height, width)` |
+
+---
 
 
 ```bash
