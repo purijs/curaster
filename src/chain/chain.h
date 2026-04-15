@@ -1,13 +1,6 @@
 /**
  * @file chain.h
  * @brief Public Chain API — immutable lazy-evaluation raster pipeline.
- *
- * Each Chain wraps an input file path and an ordered list of operations.
- * Operations are applied lazily: no GPU work happens until one of the
- * terminal methods (save_local, save_s3, to_memory, iter_begin) is called.
- *
- * All builder methods (algebra, clip, reproject) return a *new* Chain so
- * the original remains unchanged — safe for parallel use.
  */
 #pragma once
 
@@ -15,30 +8,18 @@
 #include <string>
 #include <vector>
 
-#include "../../include/pipeline.h"  // ChainOp, ReprojectParams
-#include "../../include/types.h"     // FileInfo, RasterResult
+#include "../../include/pipeline.h"
+#include "../../include/types.h"
 #include "../../include/chunk_queue.h"
 
-// Forward declaration — avoids pulling in GDAL headers.
 class GDALRasterBand;
 
-/**
- * @brief Lazy, immutable raster processing pipeline.
- *
- * Create with curaster.open(path), then chain operations:
- * @code
- * chain.algebra("(B1 - B2) / (B1 + B2)")
- *      .reproject("EPSG:4326", 0.001, 0.001)
- *      .save_local("ndvi.tif")
- * @endcode
- */
+
 class Chain {
 public:
-    /// Construct a Chain that reads from @p input_file.
     explicit Chain(const std::string& input_file);
-
-    /// Copy constructor — used by builder methods to clone the chain.
     Chain(const Chain& other);
+
 
     // ── Builder methods (return a new Chain) ──────────────────────────────
 
@@ -73,7 +54,30 @@ public:
                                      double te_xmax     = 0,
                                      double te_ymax     = 0);
 
-    // ── Info ──────────────────────────────────────────────────────────────
+    std::shared_ptr<Chain> focal(const std::string& stat = "mean",
+                                  int radius             = 1,
+                                  const std::string& shape = "square",
+                                  bool clamp_border      = true);
+
+    std::shared_ptr<Chain> terrain(const std::vector<std::string>& metrics = {},
+                                    const std::string& unit     = "degrees",
+                                    double sun_azimuth          = 315.0,
+                                    double sun_altitude         = 45.0,
+                                    const std::string& method   = "horn");
+
+    std::shared_ptr<Chain> texture(const std::vector<std::string>& features = {},
+                                    int window                 = 11,
+                                    int levels                 = 32,
+                                    const std::string& direction_mode = "average",
+                                    bool log_scale             = false,
+                                    float val_min              = 0.f,
+                                    float val_max              = 0.f);
+
+    std::vector<ZoneResult> zonal_stats(const std::string& geojson_str,
+                                         const std::vector<std::string>& stats = {},
+                                         int band = 1,
+                                         bool verbose = false);
+
 
     /**
      * @brief Return the FileInfo for the output raster (accounting for any REPROJECT op).

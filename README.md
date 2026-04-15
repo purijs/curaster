@@ -444,7 +444,160 @@ curaster.open("scene.tif") \
 
 ---
 
+---
+
+### `Chain.focal(stat, radius=3, shape="square", clamp_border=True)`
+
+Apply a moving-window focal statistic.
+
+```python
+curaster.open("dem.tif") \
+    .focal("mean", radius=5) \
+    .save_local("dem_smoothed.tif")
+
+curaster.open("dem.tif") \
+    .focal("median", radius=3, shape="circle") \
+    .save_local("dem_median.tif")
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `stat` | `str` | required | `mean`, `sum`, `min`, `max`, `std`, `variance`, `median`, `range` |
+| `radius` | `int` | `3` | Half-window radius in pixels (window = 2R+1 × 2R+1) |
+| `shape` | `str` | `"square"` | `"square"` or `"circle"` |
+| `clamp_border` | `bool` | `True` | Clamp border pixels (replicate edge rows/cols) |
+
+**Returns** a new `Chain`
+
+---
+
+### `Chain.terrain(metrics=["slope"], unit="degrees", sun_azimuth=315.0, sun_altitude=45.0, method="horn")`
+
+Compute terrain derivatives from a DEM.
+
+```python
+curaster.open("dem.tif") \
+    .terrain(["slope", "aspect", "hillshade"]) \
+    .save_local("terrain.tif")
+
+# All supported metrics:
+curaster.open("dem.tif") \
+    .terrain(["slope", "aspect", "hillshade", "tri", "tpi",
+              "roughness", "prof_curv", "plan_curv", "total_curv"],
+             unit="degrees") \
+    .save_local("terrain_all.tif")
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `metrics` | `list[str]` | `["slope"]` | Any subset of: `slope`, `aspect`, `hillshade`, `tri`, `tpi`, `roughness`, `prof_curv`, `plan_curv`, `total_curv` |
+| `unit` | `str` | `"degrees"` | Slope output unit — `"degrees"`, `"radians"`, or `"percent"` |
+| `sun_azimuth` | `float` | `315.0` | Sun azimuth for hillshade (degrees from north) |
+| `sun_altitude` | `float` | `45.0` | Sun altitude for hillshade (degrees above horizon) |
+| `method` | `str` | `"horn"` | Gradient method: `"horn"` (3×3 weighted) or `"zevenbergen"` (2-point central) |
+
+Output is a multi-band GeoTIFF with one band per metric in the order given.
+
+**Returns** a new `Chain`
+
+---
+
+### `Chain.texture(features=[], window=11, levels=32, direction_mode="average", log_scale=False, val_min=0.0, val_max=0.0)`
+
+Compute GLCM (Grey-Level Co-occurrence Matrix) Haralick texture features.
+
+```python
+curaster.open("sar.tif") \
+    .texture(["contrast", "homogeneity", "entropy"], window=15, levels=64, log_scale=True) \
+    .save_local("texture.tif")
+
+# All 18 features, 4-direction average
+curaster.open("image.tif") \
+    .texture(window=11, levels=32) \
+    .save_local("texture_full.tif")
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `features` | `list[str]` | `[]` = all | Subset of the 18 Haralick features: `asm`, `contrast`, `correlation`, `variance`, `homogeneity`, `sum_average`, `sum_variance`, `sum_entropy`, `entropy`, `diff_variance`, `diff_entropy`, `dissimilarity`, `autocorrelation`, `max_probability`, `cluster_shade`, `cluster_prominence`, `imc1`, `imc2` |
+| `window` | `int` | `11` | Sliding window size in pixels (forced odd) |
+| `levels` | `int` | `32` | Grey level quantization levels |
+| `direction_mode` | `str` | `"average"` | `"average"` — average 4 directions (18 output bands); `"separate"` — 4×18 = 72 output bands |
+| `log_scale` | `bool` | `False` | Apply `10·log10(v)` before quantization (for SAR data) |
+| `val_min` | `float` | `0.0` | Min input value for quantization (0,0 = auto-detect from file) |
+| `val_max` | `float` | `0.0` | Max input value for quantization (0,0 = auto-detect from file) |
+
+**Returns** a new `Chain`
+
+---
+
+### `Chain.zonal_stats(geojson, stats=["mean", "std", "min", "max", "count", "sum"], band=1, verbose=False)`
+
+Compute per-polygon zonal statistics over any raster. Terminal operation — returns results immediately.
+
+```python
+import json, curaster
+
+aoi = json.dumps({
+    "type": "MultiPolygon",
+    "coordinates": [...]
+})
+
+results = curaster.open("ndvi.tif").zonal_stats(aoi, stats=["mean", "std", "min", "max"])
+for r in results:
+    print(r.zone_id, r.mean, r.std_dev, r.min_val, r.max_val)
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `geojson` | `str` | required | GeoJSON `Polygon` or `MultiPolygon` string |
+| `stats` | `list[str]` | all | Any subset of `mean`, `std`, `min`, `max`, `count`, `sum` |
+| `band` | `int` | `1` | Band number to compute statistics for (1-indexed) |
+| `verbose` | `bool` | `False` | Print progress |
+
+**Returns** `list[ZoneResult]` where each has `.zone_id`, `.count`, `.mean`, `.std_dev`, `.min_val`, `.max_val`, `.sum`
+
+---
+
+### `curaster.open_stack(files)` / `StackChain`
+
+Open a multi-temporal stack of aligned GeoTIFF files and reduce them to a single raster.
+
+```python
+import curaster
+
+stack = curaster.open_stack(["s2_20230601.tif", "s2_20230701.tif", "s2_20230801.tif"])
+
+# Temporal difference (last - first)
+stack.temporal("diff").save_local("diff.tif")
+
+# Linear trend slope (change per scene)
+stack.temporal("trend", time_values=[0.0, 30.0, 60.0]).save_local("trend.tif")
+
+# Mean of all scenes
+stack.temporal("mean").save_local("mean.tif")
+
+# You can chain further operations after temporal reduction
+stack.temporal("diff") \
+    .clip(aoi_geojson) \
+    .save_local("diff_clipped.tif")
+```
+
+| `temporal()` parameter | Type | Default | Description |
+|---|---|---|---|
+| `op` | `str` | required | `diff`, `ratio`, `anomaly_mean`, `anomaly_baseline`, `trend`, `mean`, `std`, `min`, `max` |
+| `t0` | `int` | `0` | Index of the first scene (for `diff`, `ratio`) |
+| `t1` | `int` | `-1` | Index of the second scene (-1 = last) |
+| `time_values` | `list[float]` | `[]` | Timestamps for `trend` (defaults to 0, 1, 2, …) |
+
+**`StackChain.temporal()` Returns** a `Chain` (can chain `algebra`, `clip`, `save_local`, etc.)
+
+All scenes in the stack must have the same width, height, and CRS. Use `.reproject()` on each `Chain` before stacking if misaligned.
+
+---
+
 ## Building from Source
+
 
 ```bash
 # 1. Install Python build dependencies
