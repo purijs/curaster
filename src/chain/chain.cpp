@@ -24,7 +24,7 @@
 #include "../engine/engine_zonal.h"
 #include "../reproject/reproject.h"
 
-// ─── Construction ─────────────────────────────────────────────────────────────
+
 
 Chain::Chain(const std::string& input_file)
     : input_file_(input_file) {}
@@ -33,7 +33,7 @@ Chain::Chain(const Chain& other)
     : input_file_(other.input_file_)
     , operations_(other.operations_) {}
 
-// ─── Private helpers ─────────────────────────────────────────────────────────
+
 
 bool Chain::has_reproject_operation() const {
     for (const auto& op : operations_) {
@@ -52,7 +52,7 @@ FileInfo Chain::get_output_info() const {
     return src_info;
 }
 
-// ─── Pipeline context assembly ────────────────────────────────────────────────
+
 
 static PipelineCtx build_pipeline_context(const std::vector<ChainOp>& operations,
                                            const FileInfo&              src_info,
@@ -122,7 +122,7 @@ static PipelineCtx build_pipeline_context(const std::vector<ChainOp>& operations
     return ctx;
 }
 
-// ─── execute ──────────────────────────────────────────────────────────────────
+
 
 void Chain::execute(GDALRasterBand*             output_band,
                     RasterResult*               result,
@@ -131,9 +131,9 @@ void Chain::execute(GDALRasterBand*             output_band,
     FileInfo   src_info = get_file_info(input_file_);
     PipelineCtx ctx     = build_pipeline_context(operations_, src_info, input_file_);
     const FileInfo& out_info = ctx.has_reproject ? ctx.reproject_output_info : src_info;
-    (void)out_info; // reserved for future chunk-size calculations
+    (void)out_info; 
 
-    // Wire up result destinations.
+    
     if (output_band) {
         ctx.output_band = output_band;
     }
@@ -288,7 +288,7 @@ std::vector<ZoneResult> Chain::zonal_stats(const std::string& geojson_str,
 }
 
 
-// ─── Terminal methods ─────────────────────────────────────────────────────────
+
 
 void Chain::save_local(const std::string& output_path, bool verbose) {
     FileInfo      out_info  = get_output_info();
@@ -299,14 +299,14 @@ void Chain::save_local(const std::string& output_path, bool verbose) {
 }
 
 void Chain::save_s3(const std::string& s3_path, bool verbose) {
-    // Materialise to memory first, then upload via GDAL's /vsis3/ virtual FS.
+    
     auto result = to_memory(verbose);
 
     if (!result || result->data.empty()) {
         throw std::runtime_error("write_s3: empty result — nothing to upload.");
     }
 
-    // Write to a temp file then copy to S3 via CPLCopyFile.
+    
     const char* cpl_tmp = CPLGenerateTempFilename("curaster");
     std::string tmp_path = std::string(cpl_tmp) + ".tif";
 
@@ -348,7 +348,15 @@ std::shared_ptr<RasterResult> Chain::to_memory(bool verbose) {
     result->file_info   = out_info;
     result->projection  = out_info.projection;
     memcpy(result->geo_transform, out_info.geo_transform, sizeof(out_info.geo_transform));
-    result->allocate();
+
+    try {
+        result->allocate();
+    } catch (const std::bad_alloc&) {
+        throw std::runtime_error(
+            "MemoryError: raster requires " +
+            std::to_string(required_bytes / 1048576) +
+            " MB but allocation failed. Use iter_begin() to stream chunks instead.");
+    }
 
     execute(nullptr, result.get(), nullptr, verbose);
     return result;
@@ -362,7 +370,7 @@ std::shared_ptr<ChunkQueue> Chain::iter_begin(int buffer_chunk_count) {
         try {
             chain_copy.execute(nullptr, nullptr, queue);
         } catch (...) {
-            // Swallow exceptions in the background thread; the queue will signal EOF.
+            
         }
         queue->finish();
     }).detach();

@@ -10,7 +10,7 @@
 
 #include <string>
 #include <vector>
-#include "../../include/raster_core.h"  // Instruction, Opcode
+#include "../../include/raster_core.h"  
 
 /**
  * @brief Compile a raster algebra expression into a VM Instruction sequence.

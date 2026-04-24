@@ -6,13 +6,13 @@
 #define GLCM_MAX_LEVELS 128
 
 
-// ─── GLCM warp-per-pixel kernel ───────────────────────────────────────────────
-// Each warp (32 threads) computes the GLCM for ONE output pixel.
-// Shared memory: one int[L*L] GLCM per warp.
+
+
+
 
 __global__ void kernel_glcm(
     const float* __restrict__ src,
-    float*       __restrict__ dst,       // output: [18 * max_chunk_pixels]
+    float*       __restrict__ dst,       
     int     src_width,
     int     halo_height,
     int     dst_width,
@@ -20,10 +20,10 @@ __global__ void kernel_glcm(
     int     window,
     int     levels,
     float   val_min,
-    float   val_range_inv,       // 1 / (val_max - val_min)
+    float   val_range_inv,       
     int     dx,
     int     dy,
-    int     feat_stride,         // max_chunk_pixels (stride between band planes)
+    int     feat_stride,         
     bool    log_scale)
 {
     int warp_in_block = threadIdx.x / 32;
@@ -38,11 +38,11 @@ __global__ void kernel_glcm(
     int hx = out_x + R;
     int hy = out_y + R;
 
-    // Shared GLCM histogram: [warps_per_blk][levels*levels]
+    
     extern __shared__ char smem_raw[];
     int* glcm = (int*)smem_raw + warp_in_block * levels * levels;
 
-    // Zero histogram
+    
     for (int i = lane; i < levels * levels; i += 32) {
         glcm[i] = 0;
     }
@@ -50,7 +50,7 @@ __global__ void kernel_glcm(
 
     int W2 = window * window;
 
-    // Build GLCM — each lane processes a subset of window pixels
+    
     for (int i = lane; i < W2; i += 32) {
         int wy = i / window, wx = i % window;
         int sy  = max(0, min(halo_height - 1, hy + (wy - R)));
@@ -72,18 +72,18 @@ __global__ void kernel_glcm(
                              fmaxf(0.f, (v2 - val_min) * val_range_inv * (float)levels));
 
         atomicAdd(&glcm[l1 * levels + l2], 1);
-        atomicAdd(&glcm[l2 * levels + l1], 1);  // symmetric
+        atomicAdd(&glcm[l2 * levels + l1], 1);  
     }
     __syncwarp();
 
     if (lane != 0) return;
 
-    // ── Normalize ─────────────────────────────────────────────────────────────
+    
     int total = 0;
     for (int i = 0; i < levels * levels; ++i) total += glcm[i];
     float inv_total = (total > 0) ? 1.f / (float)total : 1.f;
 
-    // ── Marginals ─────────────────────────────────────────────────────────────
+    
     float px[GLCM_MAX_LEVELS] = {}, py[GLCM_MAX_LEVELS] = {};
     for (int i = 0; i < levels; ++i) {
         for (int j = 0; j < levels; ++j) {
@@ -105,7 +105,7 @@ __global__ void kernel_glcm(
     sig_x = sqrtf(fmaxf(sig_x, 1e-10f));
     sig_y = sqrtf(fmaxf(sig_y, 1e-10f));
 
-    // ── pxy+ and pxy- ─────────────────────────────────────────────────────────
+    
     float sum_av[2*GLCM_MAX_LEVELS] = {};
     float diff_av[GLCM_MAX_LEVELS]  = {};
 
@@ -158,7 +158,7 @@ __global__ void kernel_glcm(
         if (v > 1e-10f) diff_entropy -= v * log2f(v);
     }
 
-    // IMC1, IMC2
+    
     float HX = 0.f, HY = 0.f, HXY1 = 0.f, HXY2 = 0.f;
     for (int i = 0; i < levels; ++i) {
         if (px[i] > 1e-10f) HX -= px[i] * log2f(px[i]);
@@ -177,7 +177,7 @@ __global__ void kernel_glcm(
     float imc2_inner = 1.f - expf(-2.f * (HXY2 - entropy));
     float imc2 = (imc2_inner > 0.f) ? sqrtf(imc2_inner) : 0.f;
 
-    // ── Write 18 features to output ───────────────────────────────────────────
+    
     size_t pixel = (size_t)out_y * dst_width + out_x;
     const float features[18] = {
         asm_val, contrast, correlation, variance, homogeneity,
@@ -190,8 +190,8 @@ __global__ void kernel_glcm(
     }
 }
 
-// ─── Average-across-4-directions kernel ───────────────────────────────────────
-// Divides [18-band] output buffer by num_dirs (in-place, one thread per pixel per band)
+
+
 
 __global__ void kernel_glcm_avg_divide(
     float* __restrict__ dst,
@@ -206,7 +206,7 @@ __global__ void kernel_glcm_avg_divide(
     }
 }
 
-// ─── Launch wrappers ──────────────────────────────────────────────────────────
+
 
 void launch_glcm_kernel(
     const float*  d_halo_src,

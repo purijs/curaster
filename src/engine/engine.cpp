@@ -1,7 +1,3 @@
-/**
- * @file engine.cpp
- * @brief Direct-read (non-warp) pipeline engine.
- */
 #include "engine.h"
 
 #include <algorithm>
@@ -23,6 +19,7 @@
 #include "gdal_priv.h"
 
 #include "../../include/cuda_utils.h"
+#include "../../include/pinned_arena.h"
 #include "../../include/raster_core.h"
 #include "../../include/thread_buffers.h"
 
@@ -31,14 +28,10 @@
 #include "../tiff/tiff_metadata.h"
 #include "../tile_io/tile_io.h"
 
-// ─── Globals
-// ──────────────────────────────────────────────────────────────────
+PinnedArena g_pinned_arena;
 
-int g_num_threads = std::max(1, std::min(omp_get_max_threads(), 11));
+int g_num_threads = 0;
 size_t g_pinned_budget = 0;
-
-// ─── RAM budget
-// ───────────────────────────────────────────────────────────────
 
 size_t get_available_ram() {
 #ifdef _WIN32
@@ -47,6 +40,18 @@ size_t get_available_ram() {
   GlobalMemoryStatusEx(&status);
   return static_cast<size_t>(status.ullAvailPhys);
 #else
+  FILE *f = fopen("/proc/meminfo", "r");
+  if (f) {
+    char line[256];
+    size_t kb = 0;
+    while (fgets(line, sizeof(line), f)) {
+      if (sscanf(line, "MemAvailable: %zu kB", &kb) == 1) {
+        fclose(f);
+        return kb * 1024;
+      }
+    }
+    fclose(f);
+  }
   size_t available_pages = static_cast<size_t>(sysconf(_SC_AVPHYS_PAGES));
   size_t page_size = static_cast<size_t>(sysconf(_SC_PAGE_SIZE));
   return available_pages * page_size;
@@ -54,58 +59,9 @@ size_t get_available_ram() {
 }
 
 void init_ram_budget() {
-  if (g_pinned_budget != 0) {
-    return;
-  }
-  g_pinned_budget = static_cast<size_t>(get_available_ram() * 0.55);
+  size_t available = get_available_ram();
+  g_pinned_budget = static_cast<size_t>(available * 0.90);
 }
-
-// ─── Persistent thread-buffer pool
-// ────────────────────────────────────────────
-//
-// cudaHostAlloc pins physical RAM pages — even 200 MB takes ~100 ms on Linux.
-// Allocating and freeing on every engine call made algebra and streaming 3–10×
-// slower than CPU for local files (the whole budget fit in one chunk so only
-// one thread did work AND all 11 were allocated).
-//
-// The pool is keyed on (band_bytes, num_bands, num_threads, has_clip).
-// It is reused as long as the shape matches; reallocated only on shape change.
-// Python's GIL ensures sequential access between calls.
-
-struct PoolKey {
-  size_t band_bytes;
-  int num_bands;
-  int num_threads;
-  bool has_clip;
-  bool operator==(const PoolKey &o) const noexcept {
-    return band_bytes == o.band_bytes && num_bands == o.num_bands &&
-           num_threads == o.num_threads && has_clip == o.has_clip;
-  }
-};
-
-static std::vector<ThreadBufs> g_thread_pool;
-static PoolKey g_pool_key{0, 0, 0, false};
-
-static std::vector<ThreadBufs> &
-get_persistent_pool(size_t band_bytes, int num_bands, int num_threads,
-                    bool has_clip, int clip_rows) {
-  PoolKey needed{band_bytes, num_bands, num_threads, has_clip};
-  if (needed == g_pool_key && !g_thread_pool.empty()) {
-    return g_thread_pool;
-  }
-  for (auto &buf : g_thread_pool) {
-    buf.free_all();
-  }
-  g_thread_pool.clear();
-  g_thread_pool.resize(num_threads);
-  for (int i = 0; i < num_threads; ++i) {
-    g_thread_pool[i].alloc(band_bytes, num_bands, has_clip ? clip_rows : 0);
-  }
-  g_pool_key = needed;
-  return g_thread_pool;
-}
-
-// ─── Local GDAL dataset container ────────────────────────────────────────────
 
 struct DatasetPool {
   std::vector<GDALDataset *> datasets;
@@ -117,14 +73,11 @@ struct DatasetPool {
 
   ~DatasetPool() {
     for (auto *ds : datasets) {
-      if (ds) {
+      if (ds)
         GDALClose(ds);
-      }
     }
   }
 };
-
-// ─── run_engine_ex ───────────────────────────────────────────────────────────
 
 void run_engine_ex(const std::string &input_file, PipelineCtx &ctx,
                    bool verbose) {
@@ -134,7 +87,15 @@ void run_engine_ex(const std::string &input_file, PipelineCtx &ctx,
   }
 
   GDALAllRegister();
+  release_warp_pool();
+  release_halo_pool();
+  release_stack_pool();
+  release_zonal_pool();
   init_ram_budget();
+  g_pinned_arena.reset();
+
+  const int num_threads = std::max(1, omp_get_max_threads());
+  g_num_threads = num_threads;
 
   FileInfo file_info = get_file_info(input_file);
   const bool is_pixel_interleaved = (file_info.interleave == "PIXEL");
@@ -147,36 +108,49 @@ void run_engine_ex(const std::string &input_file, PipelineCtx &ctx,
   const std::vector<int> &band_slots = ctx.band_map;
   const int num_bands = static_cast<int>(band_slots.size());
 
-  // ── Chunk height ──────────────────────────────────────────────────────────
-  //
-  // Goal: produce ~num_threads chunks so every thread has real work.
-  //   chunk_height = ceil(height / num_threads) rounded up to tile boundary.
-  //
-  // For S3: use the original budget-based maximisation — larger chunks reduce
-  //   HTTP round-trips. Each thread independently fetches its tiles, so more
-  //   threads with larger chunks is the right tradeoff.
-  //
-  // For local files: the tile-aligned per-thread split is correct.
-  //   GDAL's block cache handles sequential read efficiency internally.
-  //   Each thread opens its own GDALDataset and reads a disjoint strip;
-  //   keeping chunks small keeps cudaHostAlloc bounded and all 11 threads busy.
+  size_t free_vram = 0, total_vram = 0;
+  CUDA_CHECK(cudaMemGetInfo(&free_vram, &total_vram));
+  size_t vram_budget = static_cast<size_t>(free_vram * 0.80);
 
   const int tile_h = file_info.tile_height;
   int chunk_height;
 
-  if (is_s3) {
+  {
+    
+    
+    
     size_t bytes_per_row =
         static_cast<size_t>(file_info.width) * (num_bands + 1) * sizeof(float);
-    size_t max_rows_in_budget = static_cast<size_t>(
-        g_pinned_budget / (static_cast<size_t>(g_num_threads) * bytes_per_row));
-    chunk_height = tile_h;
-    while (chunk_height + tile_h <= static_cast<int>(max_rows_in_budget)) {
-      chunk_height += tile_h;
+    size_t max_rows_ram =
+        (num_threads > 0 && bytes_per_row > 0)
+            ? g_pinned_budget / (static_cast<size_t>(num_threads) * bytes_per_row)
+            : static_cast<size_t>(INT_MAX);
+
+    size_t output_row_bytes = static_cast<size_t>(file_info.width) * sizeof(float);
+    size_t max_rows_vram =
+        (output_row_bytes > 0 && num_threads > 0)
+            ? vram_budget / (static_cast<size_t>(num_threads) * output_row_bytes)
+            : static_cast<size_t>(INT_MAX);
+
+    size_t max_rows = std::min(max_rows_ram, max_rows_vram);
+    max_rows = std::max(max_rows, static_cast<size_t>(tile_h));  
+
+    if (is_s3) {
+      
+      chunk_height = tile_h;
+      while (chunk_height + tile_h <= static_cast<int>(max_rows)) {
+        chunk_height += tile_h;
+      }
+    } else {
+      
+      int target_chunks  = 2 * num_threads;
+      int rows_per_batch = (file_info.height + target_chunks - 1) / target_chunks;
+      chunk_height = ((rows_per_batch + tile_h - 1) / tile_h) * tile_h;
+      if (static_cast<size_t>(chunk_height) > max_rows) {
+        chunk_height = static_cast<int>((max_rows / tile_h) * tile_h);
+        chunk_height = std::max(chunk_height, tile_h);
+      }
     }
-  } else {
-    int rows_per_thread =
-        (file_info.height + g_num_threads - 1) / g_num_threads;
-    chunk_height = ((rows_per_thread + tile_h - 1) / tile_h) * tile_h;
   }
 
   chunk_height = std::min(chunk_height, file_info.height);
@@ -186,16 +160,22 @@ void run_engine_ex(const std::string &input_file, PipelineCtx &ctx,
   size_t band_bytes =
       static_cast<size_t>(file_info.width) * chunk_height * sizeof(float);
 
-  // ── Persistent thread pool ────────────────────────────────────────────────
+  size_t bufs_per_thread =
+      band_bytes * num_bands + band_bytes +
+      (ctx.has_clip_mask ? chunk_height * sizeof(GpuSpanRow) : 0);
+  size_t total_arena_bytes = bufs_per_thread * num_threads;
+  g_pinned_arena.ensure(total_arena_bytes);
+  g_pinned_arena.reset();
 
-  auto &thread_pool = get_persistent_pool(band_bytes, num_bands, g_num_threads,
-                                          ctx.has_clip_mask, chunk_height);
+  std::vector<ThreadBufs> thread_pool(num_threads);
+  for (int i = 0; i < num_threads; ++i) {
+    thread_pool[i].alloc_from_arena(g_pinned_arena, band_bytes, num_bands,
+                                    ctx.has_clip_mask ? chunk_height : 0);
+  }
 
-  // ── Open GDAL datasets (non-S3 path only) ─────────────────────────────────
-
-  DatasetPool dataset_pool(g_num_threads, num_bands);
+  DatasetPool dataset_pool(num_threads, num_bands);
   if (!is_s3) {
-    for (int thread_idx = 0; thread_idx < g_num_threads; ++thread_idx) {
+    for (int thread_idx = 0; thread_idx < num_threads; ++thread_idx) {
       dataset_pool.datasets[thread_idx] =
           static_cast<GDALDataset *>(GDALOpen(input_file.c_str(), GA_ReadOnly));
       if (!dataset_pool.datasets[thread_idx]) {
@@ -208,8 +188,6 @@ void run_engine_ex(const std::string &input_file, PipelineCtx &ctx,
     }
   }
 
-  // ── Upload compiled algebra program to GPU ─────────────────────────────────
-
   Instruction *d_instructions = nullptr;
   if (!ctx.instructions.empty()) {
     CUDA_CHECK(cudaMalloc(&d_instructions,
@@ -218,8 +196,6 @@ void run_engine_ex(const std::string &input_file, PipelineCtx &ctx,
                           ctx.instructions.size() * sizeof(Instruction),
                           cudaMemcpyHostToDevice));
   }
-
-  // ── Tile layout helpers ────────────────────────────────────────────────────
 
   size_t tiles_across = ((size_t)file_info.width + file_info.tile_width - 1) /
                         file_info.tile_width;
@@ -237,18 +213,13 @@ void run_engine_ex(const std::string &input_file, PipelineCtx &ctx,
     GDALTermProgress(0.0, nullptr, &progress_state);
   }
 
-  // ── Parallel chunk processing ──────────────────────────────────────────────
-
-  omp_set_num_threads(g_num_threads);
-#pragma omp parallel for schedule(dynamic, 1)
+#pragma omp parallel for num_threads(num_threads) schedule(dynamic, 1)
   for (int chunk = 0; chunk < num_chunks; ++chunk) {
     int thread_id = omp_get_thread_num();
     int chunk_y0 = chunk * chunk_height;
     int cur_height = std::min(chunk_height, file_info.height - chunk_y0);
     size_t num_pixels = static_cast<size_t>(file_info.width) * cur_height;
     ThreadBufs &buf = thread_pool[thread_id];
-
-    // ── Phase 1: Read band data ────────────────────────────────────────────
 
     if (!is_s3) {
       dataset_pool.datasets[thread_id]->AdviseRead(
@@ -320,9 +291,8 @@ void run_engine_ex(const std::string &input_file, PipelineCtx &ctx,
                        file_info.tile_lengths, fetch_jobs);
 
         for (auto &job : fetch_jobs) {
-          if (job.err || job.data.empty()) {
+          if (job.err || job.data.empty())
             continue;
-          }
 
           int block_spp =
               is_pixel_interleaved ? file_info.samples_per_pixel : 1;
@@ -374,23 +344,20 @@ void run_engine_ex(const std::string &input_file, PipelineCtx &ctx,
                                     0});
             }
           }
-          if (is_pixel_interleaved) {
+          if (is_pixel_interleaved)
             break;
-          }
         }
 
         s3_fetch_tiles(s3_location, file_info.strip_offsets,
                        file_info.strip_lengths, fetch_jobs);
 
         for (auto &job : fetch_jobs) {
-          if (job.err || job.data.empty()) {
+          if (job.err || job.data.empty())
             continue;
-          }
 
           int sr = static_cast<int>(job.tile_index);
-          if (!is_pixel_interleaved) {
+          if (!is_pixel_interleaved)
             sr = sr % strips_per_band;
-          }
 
           int strip_first_row = sr * file_info.rows_per_strip;
           int strip_num_rows = std::min(file_info.rows_per_strip,
@@ -434,8 +401,6 @@ void run_engine_ex(const std::string &input_file, PipelineCtx &ctx,
       }
     }
 
-    // ── Phase 2: Populate clip span table ─────────────────────────────────
-
     if (ctx.has_clip_mask && buf.h_clip_spans) {
       memset(buf.h_clip_spans, 0, cur_height * sizeof(GpuSpanRow));
       for (int row = chunk_y0; row < chunk_y0 + cur_height; ++row) {
@@ -446,21 +411,15 @@ void run_engine_ex(const std::string &input_file, PipelineCtx &ctx,
       }
     }
 
-    // ── Phase 3: Launch algebra kernel ────────────────────────────────────
-
     launch_raster_algebra(d_instructions,
                           static_cast<int>(ctx.instructions.size()),
                           const_cast<const float *const *>(buf.d_band_ptrs),
                           buf.d_output, num_pixels, buf.cuda_stream);
 
-    // ── Phase 4: Launch mask kernel (if clip is active) ───────────────────
-
     if (ctx.has_clip_mask && buf.d_clip_spans) {
       launch_apply_mask(buf.d_output, num_pixels, file_info.width,
                         buf.d_clip_spans, buf.cuda_stream);
     }
-
-    // ── Phase 5: Synchronise and deliver results ───────────────────────────
 
     CUDA_CHECK(cudaStreamSynchronize(buf.cuda_stream));
 
@@ -479,8 +438,6 @@ void run_engine_ex(const std::string &input_file, PipelineCtx &ctx,
       ctx.result_callback(file_info.width, cur_height, buf.h_output, chunk_y0);
     }
 
-    // ── Phase 6: Update progress ──────────────────────────────────────────
-
     if (verbose) {
       int done = ++completed_chunks;
 #pragma omp critical
@@ -489,10 +446,12 @@ void run_engine_ex(const std::string &input_file, PipelineCtx &ctx,
     }
   }
 
-  if (d_instructions) {
+  for (int i = 0; i < num_threads; ++i) {
+    thread_pool[i].free_device_only();
+  }
+
+  if (d_instructions)
     cudaFree(d_instructions);
-  }
-  if (verbose) {
+  if (verbose)
     GDALTermProgress(1.0, nullptr, &progress_state);
-  }
 }

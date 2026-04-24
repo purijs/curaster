@@ -12,13 +12,13 @@
 #include <cstdint>
 #include <cuda_runtime_api.h>
 
-// ─── Warp kernel coarse-grid dimensions ──────────────────────────────────────
-// The GPU reprojection kernel uses a 32×32 control-point grid stored in
-// shared memory to approximate per-pixel coordinate transforms cheaply.
+
+
+
 #define WARP_GRID_WIDTH  32
 #define WARP_GRID_HEIGHT 32
 
-// ─── Raster algebra virtual-machine opcodes ───────────────────────────────────
+
 /**
  * @brief Opcodes for the stack-based per-pixel raster algebra VM.
  *
@@ -27,45 +27,45 @@
  * independently for every output pixel.
  */
 enum Opcode {
-    OP_ADD,        ///< Pop b, a → push (a + b)
-    OP_SUB,        ///< Pop b, a → push (a - b)
-    OP_MUL,        ///< Pop b, a → push (a * b)
-    OP_DIV,        ///< Pop b, a → push (a / (b + ε)) — epsilon-safe division
-    OP_LOAD_BAND,  ///< Push band[band_index] value at the current pixel
-    OP_LOAD_CONST, ///< Push a scalar constant onto the stack
-    OP_GT,         ///< Pop b, a → push (a >  b ? 1.0 : 0.0)
-    OP_LT,         ///< Pop b, a → push (a <  b ? 1.0 : 0.0)
-    OP_GTE,        ///< Pop b, a → push (a >= b ? 1.0 : 0.0)
-    OP_LTE,        ///< Pop b, a → push (a <= b ? 1.0 : 0.0)
-    OP_EQ,         ///< Pop b, a → push (a == b ? 1.0 : 0.0)
-    OP_NEQ,        ///< Pop b, a → push (a != b ? 1.0 : 0.0)
-    OP_AND,        ///< Pop b, a → push (a * b)      (fuzzy AND)
-    OP_OR,         ///< Pop b, a → push max(a, b)    (fuzzy OR)
-    OP_NOT,        ///< Replace top-of-stack → push (1.0 - top)
-    OP_IF,         ///< Pop false_val, true_val, cond → push cond·true + (1−cond)·false
-    OP_BETWEEN,    ///< Pop hi, lo, x → push (lo <= x && x <= hi ? 1.0 : 0.0)
-    OP_CLAMP,      ///< Pop hi, lo, x → push clamp(x, lo, hi)
-    OP_MIN2,       ///< Pop b, a → push min(a, b)
-    OP_MAX2,       ///< Pop b, a → push max(a, b)
+    OP_ADD,
+    OP_SUB,
+    OP_MUL,
+    OP_DIV,
+    OP_LOAD_BAND,
+    OP_LOAD_CONST,
+    OP_GT,
+    OP_LT,
+    OP_GTE,
+    OP_LTE,
+    OP_EQ,
+    OP_NEQ,
+    OP_AND,
+    OP_OR,
+    OP_NOT,
+    OP_IF,
+    OP_BETWEEN,
+    OP_CLAMP,
+    OP_MIN2,
+    OP_MAX2,
 };
 
-// ─── Algebra VM instruction ────────────────────────────────────────────────────
+
 /**
  * @brief One compiled instruction for the raster algebra virtual machine.
  */
 struct Instruction {
-    Opcode op;         ///< Operation to perform
-    float  constant;   ///< Scalar value for OP_LOAD_CONST  (unused by other ops)
-    int    band_index; ///< Band slot index for OP_LOAD_BAND (unused by other ops)
+    Opcode op;
+    float  constant;
+    int    band_index;
 };
 
-// ─── Polygon clip span types ──────────────────────────────────────────────────
+
 /**
  * @brief An inclusive column range [start, end] produced by polygon scan-conversion.
  */
 struct GpuSpanPair {
-    int start; ///< First column inside the polygon (inclusive)
-    int end;   ///< Last  column inside the polygon (inclusive)
+    int start;
+    int end;
 };
 
 /**
@@ -75,11 +75,11 @@ struct GpuSpanPair {
  * an explicit DMA transfer. Supports up to 1 024 spans per row.
  */
 struct GpuSpanRow {
-    int         num_spans;     ///< Number of valid entries in spans[]
-    GpuSpanPair spans[1024];  ///< Horizontal column ranges covering this row
+    int         num_spans;
+    GpuSpanPair spans[1024];
 };
 
-// ─── CUDA kernel launch declarations (implemented in src/gpu/) ────────────────
+
 
 /**
  * @brief Execute the compiled raster algebra program over @p num_pixels pixels.
@@ -145,7 +145,7 @@ void launch_warp_kernel(
     size_t                     max_chunk_pixels,
     cudaStream_t               stream);
 
-// ─── Focal / neighborhood kernel ─────────────────────────────────────────────
+
 
 void launch_focal_kernel(
     const float*  d_halo_src,
@@ -156,10 +156,10 @@ void launch_focal_kernel(
     int           dst_height,
     int           radius,
     int           stat_id,
-    int           shape_circle,   // 0=square 1=circle
+    int           shape_circle,   
     cudaStream_t  stream);
 
-// ─── Terrain kernel ───────────────────────────────────────────────────────────
+
 
 void launch_terrain_kernel(
     const float*  d_halo_src,
@@ -174,11 +174,11 @@ void launch_terrain_kernel(
     float         sun_az_rad,
     float         sun_alt_rad,
     bool          use_zevenbergen,
-    int           unit_mode,       // 0=degrees 1=radians 2=percent
+    int           unit_mode,       
     size_t        max_chunk_pixels,
     cudaStream_t  stream);
 
-// ─── GLCM kernel ──────────────────────────────────────────────────────────────
+
 
 void launch_glcm_kernel(
     const float*  d_halo_src,
@@ -205,7 +205,7 @@ void launch_glcm_avg_divide(
     int           num_dirs,
     cudaStream_t  stream);
 
-// ─── Zonal reduction kernel ───────────────────────────────────────────────────
+
 
 void launch_zonal_reduction(
     const float*    d_values,
@@ -219,7 +219,7 @@ void launch_zonal_reduction(
     int             num_zones,
     cudaStream_t    stream);
 
-// ─── Temporal stack kernel ────────────────────────────────────────────────────
+
 
 void launch_temporal_kernel(
     const float** d_scene_ptrs,

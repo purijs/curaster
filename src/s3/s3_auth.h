@@ -10,7 +10,7 @@
 
 #include <string>
 
-// ─── S3 object location ───────────────────────────────────────────────────────
+
 /**
  * @brief All information needed to authenticate and address one S3 object.
  *
@@ -18,17 +18,17 @@
  * if no credentials are present the request is treated as anonymous.
  */
 struct S3Loc {
-    std::string bucket;         ///< S3 bucket name
-    std::string key;            ///< Object key (path inside the bucket)
-    std::string region;         ///< AWS region (e.g. "us-east-1")
-    std::string endpoint;       ///< Host:port endpoint (default: s3.{region}.amazonaws.com)
-    std::string access_key_id;  ///< AWS_ACCESS_KEY_ID
-    std::string secret_key;     ///< AWS_SECRET_ACCESS_KEY
-    std::string session_token;  ///< AWS_SESSION_TOKEN (empty if not using STS)
-    bool        is_anonymous = false; ///< True when no credentials are available
+    std::string bucket;
+    std::string key;
+    std::string region;
+    std::string endpoint;
+    std::string access_key_id;
+    std::string secret_key;
+    std::string session_token;
+    bool        is_anonymous = false;
 };
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+
 
 /// Return true if @p path starts with "s3://" or "/vsis3/".
 bool is_s3_path(const std::string& path);

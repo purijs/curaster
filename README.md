@@ -545,7 +545,7 @@ aoi = json.dumps({
 
 results = curaster.open("ndvi.tif").zonal_stats(aoi, stats=["mean", "std", "min", "max"])
 for r in results:
-    print(r.zone_id, r.mean, r.std_dev, r.min_val, r.max_val)
+    print(r.zone_id, r.mean, r.std_dev, r.min, r.max)
 ```
 
 | Parameter | Type | Default | Description |
@@ -588,6 +588,7 @@ stack.temporal("diff") \
 | `op` | `str` | required | `diff`, `ratio`, `anomaly_mean`, `anomaly_baseline`, `trend`, `mean`, `std`, `min`, `max` |
 | `t0` | `int` | `0` | Index of the first scene (for `diff`, `ratio`) |
 | `t1` | `int` | `-1` | Index of the second scene (-1 = last) |
+| `baseline` | `str` | `"mean"` | Baseline method for anomaly operations |
 | `time_values` | `list[float]` | `[]` | Timestamps for `trend` (defaults to 0, 1, 2, …) |
 
 **`StackChain.temporal()` Returns** a `Chain` (can chain `algebra`, `clip`, `save_local`, etc.)
@@ -596,198 +597,58 @@ All scenes in the stack must have the same width, height, and CRS. Use `.reproje
 
 ---
 
-| Parameter | Type | Description |
-|---|---|---|
-| `path` | `str` | Local file path or S3 URI (`s3://` or `/vsis3/`) |
+## Performance & Benchmarks
 
-**Returns** `Chain`
+The following benchmarks demonstrate cuRaster's performance for both **Local** storage and direct **S3** reads.
 
----
+**Hardware Specifications:**
+- **Instance:** AWS g4dn.xlarge
+- **Compute:** 4 vCPUs, 16 GiB RAM (Intel Xeon 2.5 GHz)
+- **GPU:** 1x NVIDIA T4 Tensor Core (16 GiB VRAM, Compute Capability 7.5)
+- **On-Demand Cost:** €0.563 / hour
 
-### `Chain.algebra(expression)`
+We test across varying raster sizes:
+- **S:** 2048 × 2048
+- **M:** 4096 × 4096
+- **L:** 8192 × 8192
+- **XL:** 16384 × 16384
+- **XXL:** 32768 × 8192
 
-Append a band-math operation. Bands are referenced as `B1`, `B2`, … (1-indexed).
+Each cell displays the **Processing Time** alongside the **Estimated Compute Cost** for that single operation.
 
-```python
-chain.algebra("(B5 - B4) / (B5 + B4)")      # NDVI
-chain.algebra("B1 * 0.0001")                  # Scale factor
-chain.algebra("(B3 + B2 + B1) / 3")          # Visible mean
-chain.algebra("B4 > 0.3")                     # Boolean mask (1.0 or 0.0)
-chain.algebra("(B4 > 0.2) * B4")             # Apply mask conditionally
-```
+### Local GeoTIFF Operations
+These tests read files directly from the local NVMe SSD.
 
-Supported operators: `+  -  *  /  >  <  >=  <=  ==  !=`
+| Operation | S (2048×2048) (Time / Cost) | M (4096×4096) (Time / Cost) | L (8192×8192) (Time / Cost) | XXL (32768×8192) (Time / Cost) | XL (16384×16384) (Time / Cost) |
+|---|---|---|---|---|---|
+| A. Band Algebra (NDVI) | 79.9 ms / €0.000012 | 309.7 ms / €0.000048 | 1.14 s / €0.000178 | 4.35 s / €0.000680 | 4.56 s / €0.000713 |
+| B. Polygon Clip | 49.2 ms / €0.000008 | 193.8 ms / €0.000030 | 740.0 ms / €0.000116 | 2.94 s / €0.000460 | 2.91 s / €0.000455 |
+| C. Reprojection | 76.4 ms / €0.000012 | 332.6 ms / €0.000052 | 1.34 s / €0.000210 | 7.19 s / €0.001124 | 6.22 s / €0.000973 |
+| D. Full Pipeline (A+B+C) | 153.1 ms / €0.000024 | 613.9 ms / €0.000096 | 2.45 s / €0.000383 | 10.94 s / €0.001711 | 9.38 s / €0.001467 |
+| E. Large-file Stream | — | 231.3 ms / €0.000036 | 957.0 ms / €0.000150 | 3.64 s / €0.000569 | 4.00 s / €0.000626 |
+| F. Multi-band Composite | 147.9 ms / €0.000023 | 602.0 ms / €0.000094 | 2.38 s / €0.000372 | 8.54 s / €0.001336 | 8.73 s / €0.001365 |
+| G. Boolean Spectral Mask | 75.2 ms / €0.000012 | 292.7 ms / €0.000046 | 1.18 s / €0.000185 | 4.44 s / €0.000694 | 4.58 s / €0.000716 |
+| H. Focal Median | 302.6 ms / €0.000047 | 1.22 s / €0.000191 | 7.56 s / €0.001182 | 18.34 s / €0.002868 | 18.59 s / €0.002907 |
+| I. Terrain (Slope+Aspect) | 74.4 ms / €0.000012 | 356.8 ms / €0.000056 | 4.05 s / €0.000633 | 6.11 s / €0.000956 | 6.02 s / €0.000941 |
+| K. Zonal Stats | 59.5 ms / €0.000009 | 244.2 ms / €0.000038 | 1.03 s / €0.000161 | 5.95 s / €0.000931 | 4.01 s / €0.000627 |
+| L. Temporal Stack | 495.5 ms / €0.000077 | 2.09 s / €0.000327 | 8.02 s / €0.001254 | 23.63 s / €0.003695 | 24.27 s / €0.003796 |
 
-| Parameter | Type | Description |
-|---|---|---|
-| `expression` | `str` | Band-math expression string |
+### S3 Direct-Read Operations
+These tests read data dynamically over the network from an AWS S3 bucket using GDAL's virtual file system and libcurl with HTTP Range requests.
 
-**Returns** a new `Chain` (original is unmodified)
-
----
-
-### `Chain.clip(geojson)`
-
-Clip the output to a polygon. Pixels outside the polygon are set to zero.
-
-```python
-import json
-
-aoi = json.dumps({
-    "type": "Polygon",
-    "coordinates": [[[10.0, 52.0], [11.0, 52.0], [11.0, 53.0], [10.0, 53.0], [10.0, 52.0]]]
-})
-
-chain.algebra("(B5 - B4) / (B5 + B4)").clip(aoi)
-```
-
-| Parameter | Type | Description |
-|---|---|---|
-| `geojson` | `str` | GeoJSON string — `Polygon` or `MultiPolygon` |
-
-**Returns** a new `Chain`
-
----
-
-### `Chain.reproject(target_crs, ...)`
-
-Reproject the output to a different coordinate reference system.
-
-```python
-chain.reproject("EPSG:4326")                             # Auto pixel size
-chain.reproject("EPSG:3857", res_x=10.0, res_y=10.0)   # Fixed 10 m resolution
-chain.reproject("EPSG:4326", resampling="nearest")      # Nearest-neighbour
-
-# Fixed output extent (in target CRS units)
-chain.reproject(
-    "EPSG:4326",
-    res_x=0.0001, res_y=0.0001,
-    te_xmin=9.5, te_ymin=51.5,
-    te_xmax=10.5, te_ymax=52.5
-)
-```
-
-| Parameter | Type | Default | Description |
+| Operation | M (4096×4096) (Time / Cost) | L (8192×8192) (Time / Cost) | XL (16384×16384) (Time / Cost) |
 |---|---|---|---|
-| `target_crs` | `str` | required | Any CRS string GDAL understands (EPSG code, WKT, PROJ string) |
-| `res_x` | `float` | `0` | Output pixel width in target CRS units (0 = auto-derive) |
-| `res_y` | `float` | `0` | Output pixel height in target CRS units (0 = auto-derive) |
-| `resampling` | `str` | `"bilinear"` | `"bilinear"` or `"nearest"` |
-| `nodata` | `float` | `-9999.0` | Fill value for pixels outside the source extent |
-| `te_xmin` | `float` | `0` | Output extent — min X in target CRS |
-| `te_ymin` | `float` | `0` | Output extent — min Y in target CRS |
-| `te_xmax` | `float` | `0` | Output extent — max X in target CRS |
-| `te_ymax` | `float` | `0` | Output extent — max Y in target CRS |
-
-**Returns** a new `Chain`
+| S3-A. Algebra | 249.1 ms / €0.000039 | 984.6 ms / €0.000154 | 2.10 s / €0.000328 |
+| S3-B. Reprojection | 114.3 ms / €0.000018 | 437.4 ms / €0.000068 | 2.55 s / €0.000399 |
+| S3-C. Full Pipeline | 146.6 ms / €0.000023 | 2.63 s / €0.000411 | 3.09 s / €0.000483 |
+| S3-D. Streaming | 235.9 ms / €0.000037 | 886.4 ms / €0.000139 | 1.08 s / €0.000169 |
+| S3-E. Focal | 4.25 s / €0.000665 | 15.48 s / €0.002421 | 17.29 s [iter] / €0.002704 |
+| S3-F. Terrain | 3.27 s / €0.000511 | 11.06 s / €0.001730 | 8.23 s / €0.001287 |
+| S3-H. Zonal | 3.20 s / €0.000500 | 11.95 s / €0.001869 | 10.60 s / €0.001658 |
+| S3-I. Temporal | 4.35 s / €0.000680 | 15.57 s / €0.002435 | 73.92 s / €0.011560 |
 
 ---
 
-### `Chain.get_info()`
-
-Return metadata for the output raster without executing the pipeline.
-
-```python
-info = curaster.open("scene.tif").reproject("EPSG:4326").get_info()
-print(info)
-# {'width': 4096, 'height': 3072, 'geotransform': [...], 'crs': 'GEOGCS[...]'}
-```
-
-**Returns** `dict` with keys `width`, `height`, `geotransform` (list of 6 floats), `crs` (WKT string)
-
----
-
-### `Chain.save_local(path, verbose=False)`
-
-Execute the pipeline and write a Float32 tiled GeoTIFF to disk.
-
-```python
-curaster.open("scene.tif") \
-    .algebra("(B5 - B4) / (B5 + B4)") \
-    .save_local("ndvi.tif", verbose=True)
-```
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `path` | `str` | required | Output file path |
-| `verbose` | `bool` | `False` | Print a GDAL-style progress bar |
-
----
-
-### `Chain.save_s3(s3_path, verbose=False)`
-
-Execute the pipeline and upload the result directly to S3.  
-AWS credentials must be set via environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION`).
-
-```python
-curaster.open("scene.tif") \
-    .algebra("(B5 - B4) / (B5 + B4)") \
-    .save_s3("/vsis3/my-bucket/output/ndvi.tif")
-```
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `s3_path` | `str` | required | Upload destination (`/vsis3/bucket/key`) |
-| `verbose` | `bool` | `False` | Print a progress bar |
-
----
-
-### `Chain.to_memory(verbose=False)`
-
-Execute and return all pixels as a `RasterResult` object. Raises `RuntimeError` if the result would exceed 75 % of available RAM — use `iter_begin()` for large rasters.
-
-```python
-result = curaster.open("scene.tif") \
-    .algebra("B1 * 0.0001") \
-    .to_memory()
-
-import numpy as np
-arr = result.data()          # numpy array, shape (height, width), dtype float32
-print(arr.mean(), arr.std())
-print(result.width, result.height, result.proj)
-```
-
-**Returns** `RasterResult`
-
----
-
-### `Chain.iter_begin(buf_chunks=4)`
-
-Start background execution and return a `ChunkQueue` for memory-efficient streaming. Each chunk covers a horizontal strip of the output.
-
-```python
-queue = curaster.open("huge_scene.tif") \
-    .algebra("(B5 - B4) / (B5 + B4)") \
-    .iter_begin(buf_chunks=8)
-
-while True:
-    chunk = queue.next()
-    if chunk is None:
-        break
-    # chunk = {'y_offset': int, 'width': int, 'height': int, 'data': np.ndarray}
-    process(chunk["data"], chunk["y_offset"])
-```
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `buf_chunks` | `int` | `4` | Number of completed chunks to buffer before backpressure |
-
-**Returns** `ChunkQueue`
-
----
-
-### `RasterResult`
-
-Returned by `to_memory()`.
-
-| Attribute / Method | Type | Description |
-|---|---|---|
-| `.width` | `int` | Output width in pixels |
-| `.height` | `int` | Output height in pixels |
-| `.proj` | `str` | WKT coordinate reference system |
-| `.data()` | `np.ndarray` | `float32` array of shape `(height, width)` |
-
----
 
 
 ```bash

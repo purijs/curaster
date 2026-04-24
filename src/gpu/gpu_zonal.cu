@@ -3,8 +3,8 @@
 #include <cuda_runtime.h>
 #include <float.h>
 
-// ─── Zonal reduction kernel — warp-level aggregation to minimize atomic contention
-// As per §3: each warp accumulates locally, warp leader does one atomic op per stat.
+
+
 
 __global__ void kernel_zonal_reduction(
     const float*    __restrict__ d_values,
@@ -31,31 +31,31 @@ __global__ void kernel_zonal_reduction(
         }
     }
 
-    // ── Warp-level reduction: reduce matching zones within the warp ──────────
-    // Simple approach: each active thread does its own atomic if zone is non-zero.
-    // Warp-level ballot to find threads with same zone_id, then reduce within that group.
-    // For the general case (arbitrary zone per thread), we do:
-    //   1. Each thread does atomic only if valid (one op per active pixel)
-    //   2. To reduce contention, we first do warp-shuffle accumulation for
-    //      threads that happen to share the same zone_id.
-    // The shuffle approach: iterate over all 32 lanes, accumulate matching ones.
+    
+    
+    
+    
+    
+    
+    
+    
 
     if (valid) {
-        // Warp-level local accumulation for count and sum (commutative)
+        
         unsigned mask = __activemask();
 
-        // Each thread contributes to its own zone atomically.
-        // Contention mitigation: shuffle reduces repeated zones within a warp.
-        // We use a simple leader-based approach:
-        // For each unique zone_id in the warp, the lowest-lane holding that id
-        // accumulates the others via shuffle, then does one atomic.
+        
+        
+        
+        
+        
         for (int step = 0; step < 32; ++step) {
             uint16_t bcast_id = __shfl_sync(mask, zone_id, step);
-            if (!__shfl_sync(mask, (int)valid, step)) continue; // lane step not valid
+            if (!__shfl_sync(mask, (int)valid, step)) continue; 
 
             if ((int)(threadIdx.x & 31) == step) {
-                // Lane 'step' is the leader for zone bcast_id in this warp
-                // Gather contributions from other lanes with the same zone
+                
+                
                 float local_sum = val, local_sum_sq = val*val;
                 float local_min = val, local_max = val;
                 int   local_cnt = 1;
@@ -78,19 +78,19 @@ __global__ void kernel_zonal_reduction(
                 atomicMinFloat(&d_min[bcast_id], local_min);
                 atomicMaxFloat(&d_max[bcast_id], local_max);
             }
-            // Lanes that were consumed by the leader skip their own atomic
-            // by clearing their valid flag if zone_id matches
+            
+            
             if ((int)(threadIdx.x & 31) > step && zone_id == bcast_id && valid) {
-                valid = false;  // already counted by the leader
+                valid = false;  
             }
         }
     }
 }
 
-// ─── Temporal stack kernel ─────────────────────────────────────────────────────
-// op_id matches TemporalOp enum:
-//   0=DIFF  1=RATIO  2=ANOMALY_MEAN  3=ANOMALY_BASELINE  4=TREND
-//   5=TMEAN 6=TSTD   7=TMIN          8=TMAX
+
+
+
+
 
 __global__ void kernel_temporal(
     const float** __restrict__ d_scene_ptrs,
@@ -106,23 +106,23 @@ __global__ void kernel_temporal(
     size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx >= num_pixels) return;
 
-    if (op_id == 0) { // DIFF: t1 - t0
+    if (op_id == 0) { 
         d_output[idx] = d_scene_ptrs[t1_idx][idx] - d_scene_ptrs[t0_idx][idx];
 
-    } else if (op_id == 1) { // RATIO: t1 / (t0 + ε)
+    } else if (op_id == 1) { 
         d_output[idx] = d_scene_ptrs[t1_idx][idx] / (d_scene_ptrs[t0_idx][idx] + 1e-6f);
 
-    } else if (op_id == 2) { // ANOMALY_MEAN: scene - mean(all)
+    } else if (op_id == 2) { 
         float mean = 0.f;
         for (int s = 0; s < num_scenes; ++s) mean += d_scene_ptrs[s][idx];
         mean /= (float)num_scenes;
-        // Write first-scene anomaly to output (caller provides scene-specific dispatch)
+        
         d_output[idx] = d_scene_ptrs[t0_idx][idx] - mean;
 
-    } else if (op_id == 3) { // ANOMALY_BASELINE: scene - baseline scene
+    } else if (op_id == 3) { 
         d_output[idx] = d_scene_ptrs[t0_idx][idx] - d_scene_ptrs[t1_idx][idx];
 
-    } else if (op_id == 4) { // TREND: OLS slope
+    } else if (op_id == 4) { 
         float sum_t = 0.f, sum_v = 0.f, sum_tv = 0.f;
         for (int s = 0; s < num_scenes; ++s) {
             float t = d_time_values[s];
@@ -133,12 +133,12 @@ __global__ void kernel_temporal(
         float numerator = n * sum_tv - sum_t * sum_v;
         d_output[idx] = (fabsf(denominator) > 1e-10f) ? numerator / denominator : 0.f;
 
-    } else if (op_id == 5) { // TMEAN
+    } else if (op_id == 5) { 
         float sum = 0.f;
         for (int s = 0; s < num_scenes; ++s) sum += d_scene_ptrs[s][idx];
         d_output[idx] = sum / (float)num_scenes;
 
-    } else if (op_id == 6) { // TSTD
+    } else if (op_id == 6) { 
         float sum = 0.f, sum_sq = 0.f;
         for (int s = 0; s < num_scenes; ++s) {
             float v = d_scene_ptrs[s][idx];
@@ -147,19 +147,19 @@ __global__ void kernel_temporal(
         float n = (float)num_scenes;
         d_output[idx] = sqrtf(fmaxf(0.f, sum_sq/n - (sum/n)*(sum/n)));
 
-    } else if (op_id == 7) { // TMIN
+    } else if (op_id == 7) { 
         float mn = FLT_MAX;
         for (int s = 0; s < num_scenes; ++s) mn = fminf(mn, d_scene_ptrs[s][idx]);
         d_output[idx] = mn;
 
-    } else if (op_id == 8) { // TMAX
+    } else if (op_id == 8) { 
         float mx = -FLT_MAX;
         for (int s = 0; s < num_scenes; ++s) mx = fmaxf(mx, d_scene_ptrs[s][idx]);
         d_output[idx] = mx;
     }
 }
 
-// ─── Launch wrappers ──────────────────────────────────────────────────────────
+
 
 void launch_zonal_reduction(
     const float*    d_values,

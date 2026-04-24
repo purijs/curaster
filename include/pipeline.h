@@ -14,32 +14,32 @@
 #include <utility>
 #include <vector>
 
-#include "raster_core.h"  // Instruction, GpuSpanRow
-#include "types.h"        // FileInfo, ResampleMethod
+#include "raster_core.h"  
+#include "types.h"        
 
-// Forward declaration to avoid pulling in GDAL headers here.
+
 class GDALRasterBand;
 
-// ─── Reprojection parameters ──────────────────────────────────────────────────
+
 /**
  * @brief Parameters for the REPROJECT chain operation.
  */
 struct ReprojectParams {
-    std::string   target_crs;            ///< Target CRS as any string GDAL understands (EPSG, WKT, proj)
-    double        pixel_size_x  = 0;     ///< Output pixel width  (0 = auto-derive from source)
-    double        pixel_size_y  = 0;     ///< Output pixel height (0 = auto-derive from source)
-    ResampleMethod resampling   = ResampleMethod::BILINEAR; ///< Resampling algorithm
-    double        nodata_value  = -9999.0; ///< Fill value for pixels outside the source extent
+    std::string   target_crs;
+    double        pixel_size_x  = 0;
+    double        pixel_size_y  = 0;
+    ResampleMethod resampling   = ResampleMethod::BILINEAR;
+    double        nodata_value  = -9999.0;
 
-    // Optional output extent in target CRS units.
-    bool   has_extent  = false;   ///< True if the four extent fields below have been set
+    
+    bool   has_extent  = false;
     double extent_xmin = 0;
     double extent_ymin = 0;
     double extent_xmax = 0;
     double extent_ymax = 0;
 };
 
-// ─── Chain operation types ────────────────────────────────────────────────────
+
 /**
  * @brief Discriminator for the different operations a Chain can hold.
  */
@@ -55,7 +55,7 @@ enum class ChainOpType {
     TEMPORAL,
 };
 
-// ─── Focal statistics parameters ─────────────────────────────────────────────
+
 enum class FocalStat {
     MEAN, SUM, MIN, MAX, STD, VARIANCE, MEDIAN, RANGE
 };
@@ -71,7 +71,7 @@ struct FocalParams {
     bool       clamp_border = true;
 };
 
-// ─── Terrain analysis parameters ─────────────────────────────────────────────
+
 
 #define TERRAIN_SLOPE        (1u << 0)
 #define TERRAIN_ASPECT       (1u << 1)
@@ -95,20 +95,20 @@ struct TerrainParams {
     int         num_output_bands  = 1;
 };
 
-// ─── GLCM texture parameters ──────────────────────────────────────────────────
+
 struct GLCMParams {
     std::vector<std::string> features;
     int   window           = 11;
     int   levels           = 32;
-    bool  avg_directions   = true;   // true = average 4 directions → 18 bands
-    bool  log_scale        = false;  // true = 10*log10(v) before quantize (SAR)
+    bool  avg_directions   = true;   
+    bool  log_scale        = false;  
     float value_min        = 0.0f;
-    float value_max        = 0.0f;   // value_min==value_max==0 → triggers auto-range
+    float value_max        = 0.0f;   
     bool  auto_range       = true;
-    int   num_output_bands = 18;     // 18 if avg, 72 if separate
+    int   num_output_bands = 18;     
 };
 
-// ─── Zonal statistics parameters ─────────────────────────────────────────────
+
 struct ZonalParams {
     std::string              geojson_str;
     std::vector<std::string> stats;
@@ -116,7 +116,7 @@ struct ZonalParams {
     int                      band = 1;
 };
 
-// ─── Zonal statistics result ──────────────────────────────────────────────────
+
 struct ZoneResult {
     int    zone_id = 0;
     double mean    = 0.0;
@@ -127,7 +127,7 @@ struct ZoneResult {
     double sum     = 0.0;
 };
 
-// ─── Temporal operation parameters ────────────────────────────────────────────
+
 enum class TemporalOp {
     DIFF, RATIO, ANOMALY_MEAN, ANOMALY_BASELINE, TREND,
     TMEAN, TSTD, TMIN, TMAX
@@ -136,13 +136,13 @@ enum class TemporalOp {
 struct TemporalParams {
     TemporalOp        op           = TemporalOp::DIFF;
     int               t0_idx       = 0;
-    int               t1_idx       = -1;   // -1 = last scene
-    int               baseline_idx = -1;   // for ANOMALY_BASELINE
-    std::vector<float> time_values;         // scene timestamps (optional)
-    float             denominator  = 1.f;  // pre-computed OLS denom for TREND
+    int               t1_idx       = -1;   
+    int               baseline_idx = -1;   
+    std::vector<float> time_values;         
+    float             denominator  = 1.f;  
 };
 
-// ─── ChainOp ──────────────────────────────────────────────────────────────────
+
 struct ChainOp {
     ChainOpType type;
 
@@ -160,7 +160,7 @@ struct ChainOp {
     TemporalParams  temporal_params;
 };
 
-// ─── Pipeline execution context ───────────────────────────────────────────────
+
 struct PipelineCtx {
     std::vector<Instruction> instructions;
     std::vector<int>         band_map;
@@ -174,30 +174,30 @@ struct PipelineCtx {
     std::function<void(int, int, float*, int)> result_callback;
     std::function<void(int, int, float*, int)> queue_callback;
 
-    // ── Reprojection ──────────────────────────────────────────────────────────
+    
     bool             has_reproject       = false;
     ReprojectParams  reproject_params;
     FileInfo         reproject_output_info;
 
-    // ── Focal statistics ──────────────────────────────────────────────────────
+    
     bool        has_focal   = false;
     FocalParams focal_params;
     int         focal_num_output_bands = 1;
 
-    // ── Terrain analysis ──────────────────────────────────────────────────────
+    
     bool          has_terrain    = false;
     TerrainParams terrain_params;
 
-    // ── GLCM texture ──────────────────────────────────────────────────────────
+    
     bool       has_texture   = false;
     GLCMParams glcm_params;
 
-    // ── Zonal statistics (terminal) ───────────────────────────────────────────
+    
     bool        has_zonal    = false;
     ZonalParams zonal_params;
     std::vector<ZoneResult> zonal_results;
 
-    // ── Temporal stack (set by StackChain, consumed by engine_temporal) ───────
+    
     bool           has_temporal    = false;
     TemporalParams temporal_params;
     int            temporal_num_scenes = 0;

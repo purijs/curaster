@@ -6,11 +6,35 @@
 #include "../../include/raster_core.h"
 #include "../../include/types.h"
 
-// Count the number of distinct polygon zones in a GeoJSON string.
-int count_zones_geojson(const std::string& geojson_str);
 
-// Rasterize multiple GeoJSON polygons into a per-chunk uint16_t zone label array.
-// zone_id == 0 means "no zone". Returns number of zones found.
+
+
+
+
+
+
+struct PrebuiltZone {
+    std::vector<double> px;
+    std::vector<double> py;
+    uint16_t            id;
+};
+
+/// Parse a GeoJSON string into pixel-space vertex arrays.  Call once, then
+/// pass the result to rasterize_zones_prebuilt() for each chunk.
+std::vector<PrebuiltZone> build_prebuilt_zones(
+    const std::string& geojson_str,
+    const FileInfo&    file_info);
+
+/// Rasterize prebuilt zones for a given chunk row range.
+/// This avoids repeated GeoJSON parsing across chunks.
+void rasterize_zones_prebuilt(
+    const std::vector<PrebuiltZone>& zones,
+    const FileInfo&                  file_info,
+    int                              chunk_y0,
+    int                              chunk_height,
+    uint16_t*                        out_labels);
+
+
 int rasterize_zones_chunked(
     const std::string& geojson_str,
     const FileInfo&    file_info,
@@ -19,7 +43,10 @@ int rasterize_zones_chunked(
     uint16_t*          out_labels);
 
 
-// Aggregate device-side per-zone accumulators into ZoneResult list.
+
+int count_zones_geojson(const std::string& geojson_str);
+
+
 std::vector<ZoneResult> aggregate_zonal_results(
     const int*   h_count,
     const float* h_sum,

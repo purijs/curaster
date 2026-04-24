@@ -5,9 +5,9 @@
 #include <float.h>
 #include <math_constants.h>
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Sorting network for median of 9 elements (R=1, 25 compare-and-swap ops)
-// ─────────────────────────────────────────────────────────────────────────────
+
+
+
 #define SORT_SWAP(a,b) { float _t = fminf(a,b); b = fmaxf(a,b); a = _t; }
 
 __device__ __forceinline__ float median9(float v0, float v1, float v2,
@@ -23,13 +23,13 @@ __device__ __forceinline__ float median9(float v0, float v1, float v2,
     SORT_SWAP(v1,v3); SORT_SWAP(v5,v7);
     SORT_SWAP(v2,v6); SORT_SWAP(v4,v6); SORT_SWAP(v2,v4);
     SORT_SWAP(v3,v5); SORT_SWAP(v2,v3); SORT_SWAP(v5,v6);
-    return v4;  // index 4 is the median of 9
+    return v4;  
 }
 #undef SORT_SWAP
 
-// ─── Focal statistics kernel — shared-memory tiling ──────────────────────────
-// stat_id: 0=MEAN 1=SUM 2=MIN 3=MAX 4=STD 5=VARIANCE 6=MEDIAN 7=RANGE
-// shape: 0=SQUARE 1=CIRCLE (precomputed per-cell bitmask provided via constant mem)
+
+
+
 
 template<int RADIUS, int BX, int BY>
 __global__ void kernel_focal(
@@ -40,7 +40,7 @@ __global__ void kernel_focal(
     int  dst_width,
     int  dst_height,
     int  stat_id,
-    int  shape_circle)   // 0=square, 1=circle
+    int  shape_circle)   
 {
     extern __shared__ float tile[];
 
@@ -53,7 +53,7 @@ __global__ void kernel_focal(
     const int flat_id   = ty * BX + tx;
     const int tile_size = tile_w * tile_h;
 
-    // Cooperative halo load — all pixels in the extended tile
+    
     for (int i = flat_id; i < tile_size; i += BX * BY) {
         int tc = i % tile_w;
         int tr = i / tile_w;
@@ -71,12 +71,12 @@ __global__ void kernel_focal(
     const int LY = ty + RADIUS;
     const float R2 = (float)(RADIUS * RADIUS);
 
-    // ── Welford accumulators ──────────────────────────────────────────────────
+    
     float wf_mean = 0.f, wf_m2 = 0.f;
     float sum = 0.f, mn = FLT_MAX, mx = -FLT_MAX;
     int count = 0;
 
-    // Special-case R=1 median with sorting network
+    
     if (RADIUS == 1 && stat_id == 6) {
         float v0 = tile[(LY-1)*tile_w + (LX-1)];
         float v1 = tile[(LY-1)*tile_w + (LX  )];
@@ -91,8 +91,8 @@ __global__ void kernel_focal(
         return;
     }
 
-    // General window accumulation (Welford + running min/max)
-    // Also collect for median via histogram if stat_id==6 and RADIUS>1
+    
+    
     for (int dy = -RADIUS; dy <= RADIUS; ++dy) {
         for (int dx = -RADIUS; dx <= RADIUS; ++dx) {
             if (shape_circle && ((float)(dx*dx + dy*dy) > R2)) continue;
@@ -110,16 +110,16 @@ __global__ void kernel_focal(
     float n = (float)count;
     float result = 0.f;
 
-    if (stat_id == 0)      result = (count > 0) ? wf_mean : 0.f;       // MEAN
-    else if (stat_id == 1) result = sum;                                  // SUM
-    else if (stat_id == 2) result = mn;                                   // MIN
-    else if (stat_id == 3) result = mx;                                   // MAX
-    else if (stat_id == 4) result = (count > 1) ? sqrtf(wf_m2/(n-1.f)) : 0.f; // STD
-    else if (stat_id == 5) result = (count > 1) ? wf_m2/(n-1.f) : 0.f;  // VARIANCE
-    else if (stat_id == 7) result = mx - mn;                              // RANGE
+    if (stat_id == 0)      result = (count > 0) ? wf_mean : 0.f;       
+    else if (stat_id == 1) result = sum;                                  
+    else if (stat_id == 2) result = mn;                                   
+    else if (stat_id == 3) result = mx;                                   
+    else if (stat_id == 4) result = (count > 1) ? sqrtf(wf_m2/(n-1.f)) : 0.f; 
+    else if (stat_id == 5) result = (count > 1) ? wf_m2/(n-1.f) : 0.f;  
+    else if (stat_id == 7) result = mx - mn;                              
     else if (stat_id == 6) {
-        // Median for R>1: histogram approach (L=256 in-register)
-        // bin range = [mn, mx]
+        
+        
         float range = mx - mn;
         if (range < 1e-10f) { result = mn; }
         else {
@@ -149,7 +149,7 @@ __global__ void kernel_focal(
     dst[(size_t)out_y * dst_width + out_x] = result;
 }
 
-// Generic fallback (no shared memory, for very large radii)
+
 __global__ void kernel_focal_generic(
     const float* __restrict__ src,
     float*       __restrict__ dst,
@@ -201,7 +201,7 @@ __global__ void kernel_focal_generic(
     dst[(size_t)out_y * dst_width + out_x] = result;
 }
 
-// ─── Terrain kernel — 3×3 shared-memory, all metrics one-pass ────────────────
+
 
 __global__ void kernel_terrain(
     const float* __restrict__ src,
@@ -216,7 +216,7 @@ __global__ void kernel_terrain(
     float   sun_az_rad,
     float   sun_alt_rad,
     bool    use_zevenbergen,
-    int     unit_mode,      // 0=degrees 1=radians 2=percent
+    int     unit_mode,      
     size_t  max_chunk_pixels)
 {
     const int BX = 32, BY = 16;
@@ -263,7 +263,7 @@ __global__ void kernel_terrain(
     float aspect_rad = atan2f(-q, p);
     if (aspect_rad < 0.f) aspect_rad += 2.f * CUDART_PI_F;
 
-    // Convert slope for output
+    
     float slope_out = slope_rad;
     if      (unit_mode == 0) slope_out = slope_rad * (180.f / CUDART_PI_F);
     else if (unit_mode == 2) slope_out = 100.f * tanf(slope_rad);
@@ -312,7 +312,7 @@ __global__ void kernel_terrain(
         ++band_idx;
     }
 
-    // Curvature: fit z = ax²+bxy+cy²+dx+ey+f to 3×3
+    
     float cx2 = cell_x * cell_x, cy2 = cell_y * cell_y;
     float a_coef = ((z1+z3+z4+z6+z7+z9)/2.f - (z2+z5+z8)) / (3.f * cx2);
     float b_coef = (-z1+z3+z7-z9) / (4.f * cell_x * cell_y);
@@ -345,7 +345,7 @@ __global__ void kernel_terrain(
     (void)band_idx;
 }
 
-// ─── Launch wrappers ──────────────────────────────────────────────────────────
+
 
 void launch_focal_kernel(
     const float*  d_halo_src,
@@ -359,7 +359,7 @@ void launch_focal_kernel(
     int           shape_circle,
     cudaStream_t  stream)
 {
-    // Shared memory tiling: BX=32 BY=8 for all templated variants
+    
     const int BX = 32, BY = 8;
     dim3 block(BX, BY);
     dim3 grid((dst_width  + BX - 1) / BX,
@@ -380,7 +380,7 @@ void launch_focal_kernel(
     else if (radius == 10) { DISPATCH_R(10); }
     else if (radius == 15) { DISPATCH_R(15); }
     else {
-        // Generic fallback for arbitrary radius (no shared memory)
+        
         kernel_focal_generic<<<grid,block,0,stream>>>(
             d_halo_src, d_output, src_width, halo_height,
             dst_width, dst_height, radius, stat_id, shape_circle);

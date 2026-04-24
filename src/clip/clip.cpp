@@ -12,7 +12,7 @@
 #include <ogr_spatialref.h>
 #include "gdal_priv.h"
 
-// ─── Ring scan-conversion helper ─────────────────────────────────────────────
+
 
 /**
  * @brief Scan-convert one OGR polygon ring into the spans_by_row table.
@@ -29,7 +29,7 @@ static void scan_convert_ring(
 
     int num_points = ring->getNumPoints();
 
-    // Project all ring vertices from geographic to pixel space.
+    
     std::vector<double> pixel_x(num_points);
     std::vector<double> pixel_y(num_points);
 
@@ -40,14 +40,14 @@ static void scan_convert_ring(
         pixel_y[pt] = inv_gt[3] + geo_x * inv_gt[4] + geo_y * inv_gt[5];
     }
 
-    // Clamp row range to the raster extent.
+    
     int row_min = static_cast<int>(
         std::max(0.0, *std::min_element(pixel_y.begin(), pixel_y.end())));
     int row_max = static_cast<int>(
         std::min(static_cast<double>(file_info.height - 1),
                  *std::max_element(pixel_y.begin(), pixel_y.end())));
 
-    // For each scanline, find the X-intercepts of all polygon edges.
+    
     for (int row = row_min; row <= row_max; ++row) {
         std::vector<double> x_intercepts;
 
@@ -57,7 +57,7 @@ static void scan_convert_ring(
             double edge_x0 = pixel_x[edge];
             double edge_x1 = pixel_x[edge + 1];
 
-            // Only count edges that cross this scanline.
+            
             bool crosses_row =
                 (edge_y0 <= row && row < edge_y1) ||
                 (edge_y1 <= row && row < edge_y0);
@@ -71,7 +71,7 @@ static void scan_convert_ring(
 
         std::sort(x_intercepts.begin(), x_intercepts.end());
 
-        // Pair up intercepts to form [left, right] spans.
+        
         if (x_intercepts.size() >= 2) {
             auto& row_entries = spans_by_row[row];
             if (row_entries.empty()) {
@@ -88,7 +88,7 @@ static void scan_convert_ring(
     }
 }
 
-// ─── parse_polygon_to_spans ──────────────────────────────────────────────────
+
 
 void parse_polygon_to_spans(
     const std::string&                               geojson_str,
@@ -100,7 +100,7 @@ void parse_polygon_to_spans(
         throw std::runtime_error("Invalid GeoJSON for clip operation.");
     }
 
-    // Compute the inverse geotransform for geo→pixel projection.
+    
     double inv_gt[6];
     GDALInvGeoTransform(const_cast<double*>(file_info.geo_transform), inv_gt);
 
