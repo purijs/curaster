@@ -22,6 +22,11 @@
   - [Chain.save_s3()](#chainsave_s3)
   - [Chain.to_memory()](#chainto_memory)
   - [Chain.iter_begin()](#chainiter_begin)
+  - [Chain.focal()](#chainfocalstat-radius3-shapesquare-clamp_bordertrue)
+  - [Chain.terrain()](#chainterrainmetricsslope-unitdegrees-sun_azimuth3150-sun_altitude450-methodhorn)
+  - [Chain.texture()](#chaintexturefeatures-window11-levels32-direction_modeaverage-log_scalefalse-val_min00-val_max00)
+  - [Chain.zonal_stats()](#chainzonal_statsgeojson-statsmean-std-min-max-count-sum-band1-verbosefalse)
+  - [curaster.open_stack() / StackChain](#curasteropen_stackfiles--stackchain)
   - [RasterResult](#rasterresult)
   - [ChunkQueue](#chunkqueue)
 - [Examples](#examples)
@@ -619,33 +624,33 @@ Each cell displays the **Processing Time** alongside the **Estimated Compute Cos
 ### Local GeoTIFF Operations
 These tests read files directly from the local NVMe SSD.
 
-| Operation | S (2048×2048) (Time / Cost) | M (4096×4096) (Time / Cost) | L (8192×8192) (Time / Cost) | XXL (32768×8192) (Time / Cost) | XL (16384×16384) (Time / Cost) |
+| Operation | S (2048×2048) | M (4096×4096) | L (8192×8192) | XXL (32768×8192) | XL (16384×16384) |
 |---|---|---|---|---|---|
-| A. Band Algebra (NDVI) | 79.9 ms / €0.000012 | 309.7 ms / €0.000048 | 1.14 s / €0.000178 | 4.35 s / €0.000680 | 4.56 s / €0.000713 |
-| B. Polygon Clip | 49.2 ms / €0.000008 | 193.8 ms / €0.000030 | 740.0 ms / €0.000116 | 2.94 s / €0.000460 | 2.91 s / €0.000455 |
-| C. Reprojection | 76.4 ms / €0.000012 | 332.6 ms / €0.000052 | 1.34 s / €0.000210 | 7.19 s / €0.001124 | 6.22 s / €0.000973 |
-| D. Full Pipeline (A+B+C) | 153.1 ms / €0.000024 | 613.9 ms / €0.000096 | 2.45 s / €0.000383 | 10.94 s / €0.001711 | 9.38 s / €0.001467 |
-| E. Large-file Stream | — | 231.3 ms / €0.000036 | 957.0 ms / €0.000150 | 3.64 s / €0.000569 | 4.00 s / €0.000626 |
-| F. Multi-band Composite | 147.9 ms / €0.000023 | 602.0 ms / €0.000094 | 2.38 s / €0.000372 | 8.54 s / €0.001336 | 8.73 s / €0.001365 |
-| G. Boolean Spectral Mask | 75.2 ms / €0.000012 | 292.7 ms / €0.000046 | 1.18 s / €0.000185 | 4.44 s / €0.000694 | 4.58 s / €0.000716 |
-| H. Focal Median | 302.6 ms / €0.000047 | 1.22 s / €0.000191 | 7.56 s / €0.001182 | 18.34 s / €0.002868 | 18.59 s / €0.002907 |
-| I. Terrain (Slope+Aspect) | 74.4 ms / €0.000012 | 356.8 ms / €0.000056 | 4.05 s / €0.000633 | 6.11 s / €0.000956 | 6.02 s / €0.000941 |
-| K. Zonal Stats | 59.5 ms / €0.000009 | 244.2 ms / €0.000038 | 1.03 s / €0.000161 | 5.95 s / €0.000931 | 4.01 s / €0.000627 |
-| L. Temporal Stack | 495.5 ms / €0.000077 | 2.09 s / €0.000327 | 8.02 s / €0.001254 | 23.63 s / €0.003695 | 24.27 s / €0.003796 |
+| A. Band Algebra (NDVI) | 79.9 ms | 309.7 ms | 1.14 s | 4.35 s | 4.56 s |
+| B. Polygon Clip | 49.2 ms | 193.8 ms | 740.0 ms | 2.94 s | 2.91 s |
+| C. Reprojection | 76.4 ms | 332.6 ms | 1.34 s | 7.19 s | 6.22 s |
+| D. Full Pipeline (A+B+C) | 153.1 ms | 613.9 ms | 2.45 s | 10.94 s | 9.38 s |
+| E. Large-file Stream | — | 231.3 ms | 957.0 ms | 3.64 s | 4.00 s |
+| F. Multi-band Composite | 147.9 ms | 602.0 ms | 2.38 s | 8.54 s | 8.73 s |
+| G. Boolean Spectral Mask | 75.2 ms | 292.7 ms | 1.18 s | 4.44 s | 4.58 s |
+| H. Focal Median | 302.6 ms | 1.22 s | 7.56 s | 18.34 s | 18.59 s |
+| I. Terrain (Slope+Aspect) | 74.4 ms | 356.8 ms | 4.05 s | 6.11 s | 6.02 s |
+| K. Zonal Stats | 59.5 ms | 244.2 ms | 1.03 s | 5.95 s | 4.01 s |
+| L. Temporal Stack | 495.5 ms | 2.09 s | 8.02 s | 23.63 s | 24.27 s |
 
 ### S3 Direct-Read Operations
 These tests read data dynamically over the network from an AWS S3 bucket using GDAL's virtual file system and libcurl with HTTP Range requests.
 
-| Operation | M (4096×4096) (Time / Cost) | L (8192×8192) (Time / Cost) | XL (16384×16384) (Time / Cost) |
+| Operation | M (4096×4096) | L (8192×8192) | XL (16384×16384) |
 |---|---|---|---|
-| S3-A. Algebra | 249.1 ms / €0.000039 | 984.6 ms / €0.000154 | 2.10 s / €0.000328 |
-| S3-B. Reprojection | 114.3 ms / €0.000018 | 437.4 ms / €0.000068 | 2.55 s / €0.000399 |
-| S3-C. Full Pipeline | 146.6 ms / €0.000023 | 2.63 s / €0.000411 | 3.09 s / €0.000483 |
-| S3-D. Streaming | 235.9 ms / €0.000037 | 886.4 ms / €0.000139 | 1.08 s / €0.000169 |
-| S3-E. Focal | 4.25 s / €0.000665 | 15.48 s / €0.002421 | 17.29 s [iter] / €0.002704 |
-| S3-F. Terrain | 3.27 s / €0.000511 | 11.06 s / €0.001730 | 8.23 s / €0.001287 |
-| S3-H. Zonal | 3.20 s / €0.000500 | 11.95 s / €0.001869 | 10.60 s / €0.001658 |
-| S3-I. Temporal | 4.35 s / €0.000680 | 15.57 s / €0.002435 | 73.92 s / €0.011560 |
+| S3-A. Algebra | 249.1 ms | 984.6 ms | 2.10 s |
+| S3-B. Reprojection | 114.3 ms | 437.4 ms | 2.55 s |
+| S3-C. Full Pipeline | 146.6 ms | 2.63 s | 3.09 s |
+| S3-D. Streaming | 235.9 ms | 886.4 ms | 1.08 s |
+| S3-E. Focal | 4.25 s | 15.48 s | 17.29 s [iter] |
+| S3-F. Terrain | 3.27 s | 11.06 s | 8.23 s |
+| S3-H. Zonal | 3.20 s | 11.95 s | 10.60 s |
+| S3-I. Temporal | 4.35 s | 15.57 s | 73.92 s |
 
 ---
 

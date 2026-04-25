@@ -197,6 +197,35 @@ __global__ void kernel_focal_generic(
     else if (stat_id == 4) result = (count > 1) ? sqrtf(wf_m2/(n-1.f)) : 0.f;
     else if (stat_id == 5) result = (count > 1) ? wf_m2/(n-1.f) : 0.f;
     else if (stat_id == 7) result = mx - mn;
+    else if (stat_id == 6) {
+        float range = mx - mn;
+        if (range < 1e-10f) {
+            result = mn;
+        } else {
+            const int L = 256;
+            int hist[256] = {};
+            for (int dy = -radius; dy <= radius; ++dy) {
+                for (int dx = -radius; dx <= radius; ++dx) {
+                    if (shape_circle && (float)(dx*dx + dy*dy) > R2) continue;
+                    int sy2 = max(0, min(halo_height - 1, halo_y + dy));
+                    int sx2 = max(0, min(src_width - 1, halo_x + dx));
+                    float v = src[(size_t)sy2 * src_width + sx2];
+                    int bin = (int)fminf((float)(L-1),
+                                         fmaxf(0.f, (v - mn) / range * (float)L));
+                    hist[bin]++;
+                }
+            }
+            int target = (count + 1) / 2;
+            int cum = 0;
+            for (int b = 0; b < L; ++b) {
+                cum += hist[b];
+                if (cum >= target) {
+                    result = mn + ((float)b + 0.5f) / (float)L * range;
+                    break;
+                }
+            }
+        }
+    }
 
     dst[(size_t)out_y * dst_width + out_x] = result;
 }

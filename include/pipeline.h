@@ -170,7 +170,8 @@ struct PipelineCtx {
 
     std::vector<std::pair<int, float>> reclass_ranges;
 
-    GDALRasterBand* output_band = nullptr;
+    GDALRasterBand* output_band    = nullptr;
+    void*           output_dataset = nullptr;
     std::function<void(int, int, float*, int)> result_callback;
     std::function<void(int, int, float*, int)> queue_callback;
 

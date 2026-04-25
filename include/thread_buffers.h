@@ -229,7 +229,9 @@ struct ThreadBufs {
     }
 
     void alloc_halo(size_t halo_bytes, int num_out_bands, size_t max_chunk_pixels) {
-        if (halo_bytes == halo_alloc_bytes && num_out_bands == neighborhood_num_bands) {
+        if (halo_bytes == halo_alloc_bytes
+                && num_out_bands == neighborhood_num_bands
+                && max_chunk_pixels == neighborhood_max_chunk_pixels) {
             return;
         }
         free_halo();

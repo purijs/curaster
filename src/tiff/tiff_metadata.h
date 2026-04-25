@@ -33,4 +33,5 @@ FileInfo get_file_info(const std::string& file_path);
  * @throws std::runtime_error if the dataset cannot be created.
  */
 class GDALDataset;  
-GDALDataset* create_output_dataset(const std::string& output_path, const FileInfo& info);
+GDALDataset* create_output_dataset(const std::string& output_path, const FileInfo& info,
+                                   int nBands = 1);

@@ -75,7 +75,8 @@ FileInfo get_file_info(const std::string& file_path) {
 
 
 
-GDALDataset* create_output_dataset(const std::string& output_path, const FileInfo& info) {
+GDALDataset* create_output_dataset(const std::string& output_path, const FileInfo& info,
+                                   int nBands) {
     GDALAllRegister();
 
     auto* driver = static_cast<GDALDriver*>(GDALGetDriverByName("GTiff"));
@@ -92,7 +93,7 @@ GDALDataset* create_output_dataset(const std::string& output_path, const FileInf
     GDALDataset* output_dataset = driver->Create(
         output_path.c_str(),
         info.width, info.height,
-        1, GDT_Float32,
+        nBands, GDT_Float32,
         creation_options);
 
     CSLDestroy(creation_options);

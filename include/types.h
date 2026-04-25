@@ -79,15 +79,16 @@ struct SrcBBox {
 struct RasterResult {
     int      width  = 0;
     int      height = 0;
-
+    int      bands  = 1;
+    
     FileInfo    file_info;
     std::string projection;
     double      geo_transform[6] = {0, 1, 0, 0, 0, -1};
 
     std::vector<float> data;
 
-    /// Allocate storage for width × height floats, zero-initialised.
+    /// Allocate storage for width × height × bands floats, zero-initialised.
     void allocate() {
-        data.assign(static_cast<size_t>(width) * height, 0.0f);
+        data.assign(static_cast<size_t>(width) * height * bands, 0.0f);
     }
 };

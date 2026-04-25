@@ -125,12 +125,21 @@ PYBIND11_MODULE(curaster, module) {
     py::class_<RasterResult, std::shared_ptr<RasterResult>>(module, "RasterResult")
         .def_readonly("width",  &RasterResult::width)
         .def_readonly("height", &RasterResult::height)
+        .def_readonly("bands",  &RasterResult::bands)
         .def_readonly("proj",   &RasterResult::projection)
-        .def("data", [](const RasterResult& result) {
-            return py::array_t<float>(
-                { static_cast<py::ssize_t>(result.height),
-                  static_cast<py::ssize_t>(result.width) },
-                result.data.data());
+        .def("data", [](const RasterResult& result) -> py::object {
+            if (result.bands <= 1) {
+                return py::array_t<float>(
+                    { static_cast<py::ssize_t>(result.height),
+                      static_cast<py::ssize_t>(result.width) },
+                    result.data.data());
+            } else {
+                return py::array_t<float>(
+                    { static_cast<py::ssize_t>(result.bands),
+                      static_cast<py::ssize_t>(result.height),
+                      static_cast<py::ssize_t>(result.width) },
+                    result.data.data());
+            }
         });
 
     

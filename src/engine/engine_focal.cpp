@@ -26,7 +26,7 @@ struct HaloPoolKey {
     int    num_threads;
     size_t max_chunk_pixels;
     int    radius;
-    size_t vram_snapshot_mb;  
+    size_t vram_snapshot_mb;
     bool operator==(const HaloPoolKey& o) const noexcept {
         return halo_bytes == o.halo_bytes && out_bands == o.out_bands
             && num_threads == o.num_threads && max_chunk_pixels == o.max_chunk_pixels
@@ -40,8 +40,8 @@ static HaloPoolKey              g_halo_key{0,0,0,0,0,0};
 
 
 
-static std::vector<float*> g_halo_ping_b;   
-static std::vector<float*> g_halo_ping_b_d; 
+static std::vector<float*> g_halo_ping_b;
+static std::vector<float*> g_halo_ping_b_d;
 
 static std::vector<cudaStream_t> g_stream_b;
 
@@ -189,26 +189,21 @@ void run_engine_focal(const std::string& input_file, PipelineCtx& ctx, bool verb
     size_t current_free_mb  = free_vram / (1024 * 1024);
 
     
-    int num_threads = g_num_threads;
+    int num_threads = std::max(1, omp_get_max_threads());
+    g_num_threads   = num_threads;
 
     
     int chunk_height = tile_h;
     {
-        size_t bytes_per_pixel_halo = (size_t)num_src_bands * sizeof(float);   
-        size_t bytes_per_pixel_out  = (size_t)num_out_bands * sizeof(float);   
+        size_t bytes_per_pixel_halo = (size_t)num_src_bands * sizeof(float);
         size_t halo_extra_bytes     = 2 * radius * width * num_src_bands * sizeof(float);
-        
+
         while (chunk_height + tile_h <= height) {
-            
-            
-            
-            
-            
             size_t per_thread_pinned =
                 2 * (size_t)width * (chunk_height + 2 * radius) * bytes_per_pixel_halo
               + (size_t)width * chunk_height * (num_src_bands + 1) * sizeof(float);
             if (per_thread_pinned * num_threads > (size_t)(g_pinned_budget * 0.80)) break;
-            
+
             size_t per_thread_vram = 2 * halo_extra_bytes
                                    + (size_t)width * chunk_height * num_out_bands * sizeof(float);
             if (per_thread_vram * num_threads > vram_budget) break;
@@ -266,7 +261,7 @@ void run_engine_focal(const std::string& input_file, PipelineCtx& ctx, bool verb
     }
 
     
-    int terrain_unit_mode = 0; 
+    int terrain_unit_mode = 0;
     if (ctx.has_terrain) {
         const std::string& u = ctx.terrain_params.unit;
         if      (u == "radians") terrain_unit_mode = 1;
@@ -362,23 +357,51 @@ void run_engine_focal(const std::string& input_file, PipelineCtx& ctx, bool verb
         
         
         size_t cur_pixels = (size_t)width * cur_h;
-        CUDA_CHECK(cudaMemcpyAsync(buf.d_output, buf.d_neighborhood_output,
-                                   cur_pixels * sizeof(float),
-                                   cudaMemcpyDeviceToDevice, stream_cur));
 
-        
-        CUDA_CHECK(cudaStreamSynchronize(stream_cur));
+        if (num_out_bands == 1) {
+            CUDA_CHECK(cudaMemcpyAsync(buf.d_output, buf.d_neighborhood_output,
+                                       cur_pixels * sizeof(float),
+                                       cudaMemcpyDeviceToDevice, stream_cur));
+            CUDA_CHECK(cudaStreamSynchronize(stream_cur));
 
-        
-        if (ctx.output_band) {
-            
+            if (ctx.output_band) {
 #pragma omp critical(gdal_write)
-            ctx.output_band->RasterIO(GF_Write, 0, y0, width, cur_h,
-                                       buf.h_output, width, cur_h,
-                                       GDT_Float32, 0, 0);
+                ctx.output_band->RasterIO(GF_Write, 0, y0, width, cur_h,
+                                           buf.h_output, width, cur_h,
+                                           GDT_Float32, 0, 0);
+            }
+            if (ctx.queue_callback)  { ctx.queue_callback(width, cur_h, buf.h_output, y0); }
+            if (ctx.result_callback) { ctx.result_callback(width, cur_h, buf.h_output, y0); }
+
+        } else {
+            CUDA_CHECK(cudaStreamSynchronize(stream_cur));
+            std::vector<float> mb_host(max_chunk_pixels * num_out_bands);
+            CUDA_CHECK(cudaMemcpy(mb_host.data(), buf.d_neighborhood_output,
+                                  max_chunk_pixels * num_out_bands * sizeof(float),
+                                  cudaMemcpyDeviceToHost));
+
+            if (ctx.output_dataset) {
+                GDALDataset* out_ds = static_cast<GDALDataset*>(ctx.output_dataset);
+#pragma omp critical(gdal_write)
+                for (int b = 0; b < num_out_bands; ++b) {
+                    out_ds->GetRasterBand(b + 1)->RasterIO(
+                        GF_Write, 0, y0, width, cur_h,
+                        mb_host.data() + (size_t)b * max_chunk_pixels, width, cur_h,
+                        GDT_Float32, 0, 0);
+                }
+            }
+
+            if (ctx.result_callback || ctx.queue_callback) {
+                std::vector<float> compact(cur_pixels * num_out_bands);
+                for (int b = 0; b < num_out_bands; ++b) {
+                    memcpy(compact.data() + (size_t)b * cur_pixels,
+                           mb_host.data() + (size_t)b * max_chunk_pixels,
+                           cur_pixels * sizeof(float));
+                }
+                if (ctx.queue_callback)  { ctx.queue_callback(width, cur_h, compact.data(), y0); }
+                if (ctx.result_callback) { ctx.result_callback(width, cur_h, compact.data(), y0); }
+            }
         }
-        if (ctx.queue_callback)  { ctx.queue_callback(width, cur_h, buf.h_output, y0); }
-        if (ctx.result_callback) { ctx.result_callback(width, cur_h, buf.h_output, y0); }
 
         if (verbose) {
             int done = ++completed_chunks;
