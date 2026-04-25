@@ -4,8 +4,13 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
-#include <unistd.h>
 #include <vector>
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 #include "gdal_priv.h"
 #include "cpl_vsi.h"
@@ -325,7 +330,14 @@ void Chain::save_s3(const std::string& s3_path, bool verbose) {
     // Write to a real disk temp file first (chunk-by-chunk, no RAM accumulation),
     // then upload to S3 as a single sequential copy.  This avoids GDAL buffering
     // the whole output in /vsimem/ when CPL_VSIL_USE_TEMP_FILE_FOR_RANDOM_WRITE=YES.
+#ifdef _WIN32
+    char tmp_dir[MAX_PATH];
+    GetTempPathA(MAX_PATH, tmp_dir);
+    std::string tmp_path = std::string(tmp_dir) + "curaster_s3_"
+                         + std::to_string(GetCurrentProcessId()) + ".tif";
+#else
     std::string tmp_path = std::string("/tmp/curaster_s3_") + std::to_string(getpid()) + ".tif";
+#endif
 
     try {
         save_local(tmp_path, verbose);
