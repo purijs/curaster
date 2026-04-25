@@ -174,11 +174,26 @@ PYBIND11_MODULE(curaster, module) {
                 delete static_cast<std::vector<float>*>(ptr);
             });
 
-            py::array_t<float> array(
-                { static_cast<py::ssize_t>(chunk.height),
-                  static_cast<py::ssize_t>(chunk.width) },
-                owned_buffer->data(),
-                buffer_capsule);
+            size_t num_pixels = static_cast<size_t>(chunk.width) * chunk.height;
+            int num_bands = (num_pixels > 0)
+                          ? static_cast<int>(owned_buffer->size() / num_pixels)
+                          : 1;
+
+            py::array_t<float> array;
+            if (num_bands <= 1) {
+                array = py::array_t<float>(
+                    { static_cast<py::ssize_t>(chunk.height),
+                      static_cast<py::ssize_t>(chunk.width) },
+                    owned_buffer->data(),
+                    buffer_capsule);
+            } else {
+                array = py::array_t<float>(
+                    { static_cast<py::ssize_t>(num_bands),
+                      static_cast<py::ssize_t>(chunk.height),
+                      static_cast<py::ssize_t>(chunk.width) },
+                    owned_buffer->data(),
+                    buffer_capsule);
+            }
 
             py::dict result_dict;
             result_dict["y_offset"] = chunk.y_offset;
