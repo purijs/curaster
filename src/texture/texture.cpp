@@ -42,7 +42,7 @@ void build_glcm_params(GLCMParams& gp,
         }
     }
 
-    // Always output all 18 features from the kernel; API selects subset
+    
     gp.num_output_bands = NUM_ALL_FEATURES;
     if (!gp.avg_directions) {
         gp.num_output_bands = NUM_ALL_FEATURES * 4;

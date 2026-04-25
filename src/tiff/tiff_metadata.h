@@ -5,7 +5,7 @@
 #pragma once
 
 #include <string>
-#include "../../include/types.h"  // FileInfo
+#include "../../include/types.h"  
 
 /**
  * @brief Open a GeoTIFF file and extract its metadata into a FileInfo.
@@ -32,5 +32,6 @@ FileInfo get_file_info(const std::string& file_path);
  * @return             A GDALDataset* opened for writing (caller must GDALClose it).
  * @throws std::runtime_error if the dataset cannot be created.
  */
-class GDALDataset;  // Forward declaration — avoid pulling in gdal_priv.h everywhere
-GDALDataset* create_output_dataset(const std::string& output_path, const FileInfo& info);
+class GDALDataset;  
+GDALDataset* create_output_dataset(const std::string& output_path, const FileInfo& info,
+                                   int nBands = 1);

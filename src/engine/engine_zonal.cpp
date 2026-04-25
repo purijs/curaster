@@ -19,9 +19,9 @@
 #include "../tiff/tiff_metadata.h"
 #include "../zonal/zonal.h"
 
-// ─── Persistent zonal pool ────────────────────────────────────────────────────
-// (single-thread: zonal_stats is a terminal, no OMP parallelism needed here
-//  since atomic device-side reduction handles parallelism across chunks)
+
+
+
 
 struct ZonalPoolKey {
     int    num_zones;
@@ -36,7 +36,7 @@ static ThreadBufs        g_zonal_buf;
 static ZonalPoolKey      g_zonal_key{0, 0, 0};
 static bool              g_zonal_init = false;
 
-// Ping-pong: second label buffer and stream for prefetch
+
 static uint16_t* g_zonal_label_b     = nullptr;
 static uint16_t* g_zonal_label_b_dev = nullptr;
 static float*    g_zonal_val_b       = nullptr;
@@ -55,19 +55,19 @@ static void zonal_ensure_pool(int num_zones, int chunk_height, int width) {
         cudaStreamDestroy(g_zonal_stream_b);
     }
 
-    // Base: value buffer (float, width*chunk_height) + base structure
+    
     size_t pixel_bytes  = (size_t)width * chunk_height * sizeof(float);
     size_t label_bytes  = (size_t)width * chunk_height * sizeof(uint16_t);
 
-    // Alloc main buf
-    g_zonal_buf.alloc(pixel_bytes, 1, 0); // 1 band of float values
+    
+    g_zonal_buf.alloc(pixel_bytes, 1, 0); 
     g_zonal_buf.alloc_zonal(num_zones, chunk_height, width);
 
-    // Init accumulators
+    
     CUDA_CHECK(cudaMemset(g_zonal_buf.d_zone_count,   0, (num_zones+1)*sizeof(int)));
     CUDA_CHECK(cudaMemset(g_zonal_buf.d_zone_sum,     0, (num_zones+1)*sizeof(float)));
     CUDA_CHECK(cudaMemset(g_zonal_buf.d_zone_sum_sq,  0, (num_zones+1)*sizeof(float)));
-    // Init min=+FLT_MAX, max=-FLT_MAX
+    
     std::vector<float> init_min(num_zones+1,  FLT_MAX);
     std::vector<float> init_max(num_zones+1, -FLT_MAX);
     CUDA_CHECK(cudaMemcpy(g_zonal_buf.d_zone_min_buf, init_min.data(),
@@ -75,13 +75,13 @@ static void zonal_ensure_pool(int num_zones, int chunk_height, int width) {
     CUDA_CHECK(cudaMemcpy(g_zonal_buf.d_zone_max_buf, init_max.data(),
                           (num_zones+1)*sizeof(float), cudaMemcpyHostToDevice));
 
-    // Ping-B label buffer
+    
     CUDA_CHECK(cudaHostAlloc(&g_zonal_label_b, label_bytes, cudaHostAllocMapped));
     memset(g_zonal_label_b, 0, label_bytes);
     CUDA_CHECK(cudaHostGetDevicePointer(
         reinterpret_cast<void**>(&g_zonal_label_b_dev), g_zonal_label_b, 0));
 
-    // Ping-B value buffer
+    
     CUDA_CHECK(cudaHostAlloc(&g_zonal_val_b, pixel_bytes, cudaHostAllocMapped));
     memset(g_zonal_val_b, 0, pixel_bytes);
     CUDA_CHECK(cudaHostGetDevicePointer(
@@ -92,10 +92,25 @@ static void zonal_ensure_pool(int num_zones, int chunk_height, int width) {
     g_zonal_init  = true;
 }
 
-// ─── run_engine_zonal ─────────────────────────────────────────────────────────
+void release_zonal_pool() {
+    if (!g_zonal_init) return;
+    g_zonal_buf.free_zonal();
+    g_zonal_buf.free_all();
+    if (g_zonal_label_b) { cudaFreeHost(g_zonal_label_b); g_zonal_label_b = nullptr; }
+    if (g_zonal_val_b)   { cudaFreeHost(g_zonal_val_b);   g_zonal_val_b   = nullptr; }
+    if (g_zonal_stream_b) { cudaStreamDestroy(g_zonal_stream_b); g_zonal_stream_b = {}; }
+    g_zonal_key  = ZonalPoolKey{0, 0, 0};
+    g_zonal_init = false;
+}
+
+
 
 void run_engine_zonal(const std::string& input_file, PipelineCtx& ctx, bool verbose) {
     GDALAllRegister();
+    release_warp_pool();
+    release_halo_pool();
+    release_stack_pool();
+    g_pinned_arena.release();
     init_ram_budget();
 
     FileInfo src_info = get_file_info(input_file);
@@ -103,10 +118,10 @@ void run_engine_zonal(const std::string& input_file, PipelineCtx& ctx, bool verb
     int height = src_info.height;
 
     int chunk_height = src_info.tile_height;
-    // For large images, allow multiple tiles per chunk (budget-aware)
+    
     {
         size_t bytes_per_row = (size_t)width * (sizeof(float) + sizeof(uint16_t));
-        size_t max_rows = g_pinned_budget / bytes_per_row / 4; // /4 = two ping-pong pairs
+        size_t max_rows = g_pinned_budget / bytes_per_row / 4; 
         while (chunk_height + src_info.tile_height <= (int)max_rows &&
                chunk_height + src_info.tile_height <= height) {
             chunk_height += src_info.tile_height;
@@ -116,12 +131,12 @@ void run_engine_zonal(const std::string& input_file, PipelineCtx& ctx, bool verb
 
     int num_chunks = (height + chunk_height - 1) / chunk_height;
 
+    auto prebuilt_zones = build_prebuilt_zones(ctx.zonal_params.geojson_str, src_info);
+    int  num_zones = static_cast<int>(prebuilt_zones.size());
+    if (num_zones == 0) return;
+
     int band_idx = std::max(1, ctx.zonal_params.band) - 1;
     band_idx = std::min(band_idx, src_info.samples_per_pixel - 1);
-
-    // First: count zones from GeoJSON parse
-    int num_zones = count_zones_geojson(ctx.zonal_params.geojson_str);
-    if (num_zones == 0) return;
 
     zonal_ensure_pool(num_zones, chunk_height, width);
 
@@ -129,8 +144,8 @@ void run_engine_zonal(const std::string& input_file, PipelineCtx& ctx, bool verb
     if (!ds) throw std::runtime_error("run_engine_zonal: cannot open " + input_file);
     GDALRasterBand* band = ds->GetRasterBand(band_idx + 1);
 
-    // Pointers to ping/pong buffers
-    // Ping-A = main buf, Ping-B = secondary
+    
+    
     float*    val_bufs[2]   = { g_zonal_buf.h_bands[0],  g_zonal_val_b };
     float*    val_devs[2]   = { g_zonal_buf.d_bands[0],  g_zonal_val_b_dev };
     uint16_t* lbl_bufs[2]   = { g_zonal_buf.h_zone_labels, g_zonal_label_b };
@@ -140,15 +155,15 @@ void run_engine_zonal(const std::string& input_file, PipelineCtx& ctx, bool verb
     double progress_state = -1.0;
     if (verbose) GDALTermProgress(0.0, nullptr, &progress_state);
 
-    // ── Prefetch first chunk synchronously ────────────────────────────────────
+    
     int slot = 0;
     {
         int y0    = 0;
         int cur_h = std::min(chunk_height, height);
         band->RasterIO(GF_Read, 0, y0, width, cur_h,
                        val_bufs[slot], width, cur_h, GDT_Float32, 0, 0);
-        rasterize_zones_chunked(ctx.zonal_params.geojson_str, src_info,
-                                 y0, cur_h, lbl_bufs[slot]);
+        rasterize_zones_prebuilt(prebuilt_zones, src_info,
+                                  y0, cur_h, lbl_bufs[slot]);
     }
 
     for (int chunk = 0; chunk < num_chunks; ++chunk) {
@@ -156,28 +171,27 @@ void run_engine_zonal(const std::string& input_file, PipelineCtx& ctx, bool verb
         int cur_h = std::min(chunk_height, height - y0);
         size_t cur_pixels = (size_t)width * cur_h;
 
-        // Current slot has already been filled (by prefetch above)
+        
         int cur_slot  = slot;
         int next_slot = 1 - slot;
 
-        // ── Phase A: Launch GPU reduction for current chunk ────────────────────
+        
         launch_zonal_reduction(
             val_devs[cur_slot], lbl_devs[cur_slot], cur_pixels,
             g_zonal_buf.d_zone_count, g_zonal_buf.d_zone_sum,
             g_zonal_buf.d_zone_sum_sq, g_zonal_buf.d_zone_min_buf,
             g_zonal_buf.d_zone_max_buf, num_zones, streams[cur_slot]);
 
-        // ── Phase B: Prefetch NEXT chunk while GPU runs Phase A ────────────────
         if (chunk + 1 < num_chunks) {
             int ny0    = (chunk + 1) * chunk_height;
             int ncur_h = std::min(chunk_height, height - ny0);
             band->RasterIO(GF_Read, 0, ny0, width, ncur_h,
                            val_bufs[next_slot], width, ncur_h, GDT_Float32, 0, 0);
-            rasterize_zones_chunked(ctx.zonal_params.geojson_str, src_info,
-                                     ny0, ncur_h, lbl_bufs[next_slot]);
+            rasterize_zones_prebuilt(prebuilt_zones, src_info,
+                                      ny0, ncur_h, lbl_bufs[next_slot]);
         }
 
-        // ── Phase C: Wait for GPU to finish current chunk ──────────────────────
+        
         CUDA_CHECK(cudaStreamSynchronize(streams[cur_slot]));
 
         if (verbose) {
@@ -188,7 +202,7 @@ void run_engine_zonal(const std::string& input_file, PipelineCtx& ctx, bool verb
         slot = next_slot;
     }
 
-    // ── Aggregate results on host ─────────────────────────────────────────────
+    
     int n = num_zones + 1;
     std::vector<int>   h_count(n);
     std::vector<float> h_sum(n), h_sum_sq(n), h_min(n), h_max(n);

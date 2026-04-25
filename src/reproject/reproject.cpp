@@ -11,16 +11,16 @@
 
 #include "gdal_priv.h"
 #include "ogr_spatialref.h"
-#include "../../include/pipeline.h"   // ReprojectParams
-#include "../../include/raster_core.h" // WARP_GRID_WIDTH, WARP_GRID_HEIGHT
+#include "../../include/pipeline.h"   
+#include "../../include/raster_core.h" 
 
-// ─── pre_pass_reproject ───────────────────────────────────────────────────────
 
-FileInfo pre_pass_reproject(const std::string&     /*input_file*/,
+
+FileInfo pre_pass_reproject(const std::string&     ,
                             const FileInfo&        src_info,
                             const ReprojectParams& params) {
 
-    // Build the destination SRS from whatever string GDAL understands.
+    
     OGRSpatialReference dst_srs;
 #if GDAL_VERSION_MAJOR >= 3
     dst_srs.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
@@ -34,21 +34,21 @@ FileInfo pre_pass_reproject(const std::string&     /*input_file*/,
     std::string dst_wkt(dst_wkt_raw);
     CPLFree(dst_wkt_raw);
 
-    // Build the source SRS from the source file's WKT.
+    
     OGRSpatialReference src_srs;
 #if GDAL_VERSION_MAJOR >= 3
     src_srs.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
 #endif
     src_srs.importFromWkt(src_info.projection.c_str());
 
-    // Create a forward coordinate transformation (src → dst) to project corners.
+    
     OGRCoordinateTransformation* forward_ct =
         OGRCreateCoordinateTransformation(&src_srs, &dst_srs);
     if (!forward_ct) {
         throw std::runtime_error("Cannot create forward coordinate transformation.");
     }
 
-    // Project the four corners of the source raster into the target CRS.
+    
     const double W = static_cast<double>(src_info.width);
     const double H = static_cast<double>(src_info.height);
     const double* gt = src_info.geo_transform;
@@ -63,7 +63,7 @@ FileInfo pre_pass_reproject(const std::string&     /*input_file*/,
     double projected_ymin = *std::min_element(corner_y, corner_y + 4);
     double projected_ymax = *std::max_element(corner_y, corner_y + 4);
 
-    // Override with user-specified extent if provided.
+    
     if (params.has_extent) {
         projected_xmin = params.extent_xmin;
         projected_xmax = params.extent_xmax;
@@ -71,7 +71,7 @@ FileInfo pre_pass_reproject(const std::string&     /*input_file*/,
         projected_ymax = params.extent_ymax;
     }
 
-    // Derive pixel size: use user-specified values or auto-compute from source.
+    
     double pixel_size_x = params.pixel_size_x;
     double pixel_size_y = params.pixel_size_y;
     if (pixel_size_x <= 0 || pixel_size_y <= 0) {
@@ -79,7 +79,7 @@ FileInfo pre_pass_reproject(const std::string&     /*input_file*/,
         pixel_size_y = (projected_ymax - projected_ymin) / src_info.height;
     }
 
-    // Build the output FileInfo.
+    
     FileInfo out_info;
     out_info.width  = std::max(1, static_cast<int>(
         std::round((projected_xmax - projected_xmin) / pixel_size_x)));
@@ -96,7 +96,7 @@ FileInfo pre_pass_reproject(const std::string&     /*input_file*/,
     out_info.projection       = dst_wkt;
     out_info.tile_width       = 512;
     out_info.tile_height      = 512;
-    out_info.data_type        = 6;  // GDT_Float32
+    out_info.data_type        = 6;  
     out_info.samples_per_pixel = src_info.samples_per_pixel;
     out_info.interleave        = "BAND";
     out_info.is_tiled          = true;
@@ -104,7 +104,7 @@ FileInfo pre_pass_reproject(const std::string&     /*input_file*/,
     return out_info;
 }
 
-// ─── WarpTransformer ──────────────────────────────────────────────────────────
+
 
 void WarpTransformer::initialise(const FileInfo& src_info, const FileInfo& dst_info) {
     OGRSpatialReference src_srs, dst_srs;
@@ -115,7 +115,7 @@ void WarpTransformer::initialise(const FileInfo& src_info, const FileInfo& dst_i
     src_srs.importFromWkt(src_info.projection.c_str());
     dst_srs.importFromWkt(dst_info.projection.c_str());
 
-    // Note: direction is dst → src (inverse warp).
+    
     auto* ct = OGRCreateCoordinateTransformation(&dst_srs, &src_srs);
     if (!ct) {
         throw std::runtime_error("Cannot create coordinate transformation for warp.");
@@ -129,7 +129,7 @@ void WarpTransformer::initialise(const FileInfo& src_info, const FileInfo& dst_i
 }
 
 void WarpTransformer::transform_pixels(double* x_coords, double* y_coords, int count) const {
-    // Step 1: destination pixel → destination geographic.
+    
     for (int i = 0; i < count; ++i) {
         double dst_col = x_coords[i];
         double dst_row = y_coords[i];
@@ -139,11 +139,11 @@ void WarpTransformer::transform_pixels(double* x_coords, double* y_coords, int c
                                             + dst_row * dst_geotransform_[5];
     }
 
-    // Step 2: destination geographic → source geographic (OGR).
+    
     static_cast<OGRCoordinateTransformation*>(ogr_transform_)
         ->Transform(count, x_coords, y_coords);
 
-    // Step 3: source geographic → source pixel.
+    
     for (int i = 0; i < count; ++i) {
         double src_geo_x = x_coords[i];
         double src_geo_y = y_coords[i];
@@ -162,7 +162,7 @@ void WarpTransformer::destroy() {
     }
 }
 
-// ─── compute_coarse_grid ─────────────────────────────────────────────────────
+
 
 void compute_coarse_grid(const WarpTransformer& transformer,
                          int                    chunk_y0_dst,
@@ -171,7 +171,7 @@ void compute_coarse_grid(const WarpTransformer& transformer,
                          double*                out_x,
                          double*                out_y) {
 
-    // Fill the grid with evenly-spaced destination pixel coordinates.
+    
     for (int grid_row = 0; grid_row < WARP_GRID_HEIGHT; ++grid_row) {
         for (int grid_col = 0; grid_col < WARP_GRID_WIDTH; ++grid_col) {
 
@@ -188,11 +188,11 @@ void compute_coarse_grid(const WarpTransformer& transformer,
         }
     }
 
-    // Transform all control points from destination pixel → source pixel in one call.
+    
     transformer.transform_pixels(out_x, out_y, WARP_GRID_WIDTH * WARP_GRID_HEIGHT);
 }
 
-// ─── coarse_grid_to_source_bbox ──────────────────────────────────────────────
+
 
 SrcBBox coarse_grid_to_source_bbox(const double* grid_x, const double* grid_y,
                                    int src_width, int src_height) {
@@ -208,7 +208,7 @@ SrcBBox coarse_grid_to_source_bbox(const double* grid_x, const double* grid_y,
         y_max = std::max(y_max, grid_y[i]);
     }
 
-    // Add a 2-pixel margin and clamp to the source raster.
+    
     SrcBBox bbox;
     bbox.x0 = std::max(0,            static_cast<int>(std::floor(x_min)) - 2);
     bbox.y0 = std::max(0,            static_cast<int>(std::floor(y_min)) - 2);

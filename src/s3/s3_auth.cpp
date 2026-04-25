@@ -13,7 +13,7 @@
 #include <openssl/hmac.h>
 #include <openssl/sha.h>
 
-// ─── Hex / SHA-256 / HMAC helpers ────────────────────────────────────────────
+
 
 /// Encode @p num_bytes raw bytes as a lower-case hex string.
 static std::string bytes_to_hex(const unsigned char* bytes, int num_bytes) {
@@ -46,7 +46,7 @@ static std::string hmac_sha256_raw(const std::string& key, const std::string& me
     return std::string(reinterpret_cast<char*>(digest), 32);
 }
 
-// ─── S3 URI helpers ───────────────────────────────────────────────────────────
+
 
 bool is_s3_path(const std::string& path) {
     return path.rfind("s3://",   0) == 0
@@ -54,7 +54,7 @@ bool is_s3_path(const std::string& path) {
 }
 
 S3Loc parse_s3_path(const std::string& path) {
-    // Strip the URI scheme prefix.
+    
     std::string stripped = path;
     if (stripped.rfind("/vsis3/", 0) == 0) {
         stripped = stripped.substr(7);
@@ -62,13 +62,13 @@ S3Loc parse_s3_path(const std::string& path) {
         stripped = stripped.substr(5);
     }
 
-    // Split "bucket/key/…" on the first slash.
+    
     auto slash_pos    = stripped.find('/');
     S3Loc location;
     location.bucket   = stripped.substr(0, slash_pos);
     location.key      = stripped.substr(slash_pos + 1);
 
-    // Read credentials from the environment.
+    
     const char* env_access_key    = std::getenv("AWS_ACCESS_KEY_ID");
     const char* env_secret_key    = std::getenv("AWS_SECRET_ACCESS_KEY");
     const char* env_session_token = std::getenv("AWS_SESSION_TOKEN");
@@ -86,18 +86,18 @@ S3Loc parse_s3_path(const std::string& path) {
     return location;
 }
 
-// ─── SigV4 request signing ────────────────────────────────────────────────────
+
 
 std::string build_s3_request_url(const S3Loc&       location,
                                  const std::string& range_header,
                                  std::string&       out_auth_header) {
-    // Anonymous: just return the plain URL.
+    
     if (location.is_anonymous) {
         out_auth_header = range_header;
         return "https://" + location.endpoint + "/" + location.bucket + "/" + location.key;
     }
 
-    // Derive date/datetime strings in UTC.
+    
     auto now         = std::chrono::system_clock::now();
     auto time_t_now  = std::chrono::system_clock::to_time_t(now);
     struct tm utc_time{};
@@ -107,15 +107,15 @@ std::string build_s3_request_url(const S3Loc&       location,
     gmtime_r(&time_t_now, &utc_time);
 #endif
 
-    char date8[9];   // "YYYYMMDD"
-    char dt16[17];   // "YYYYMMDDTHHmmSSZ"
+    char date8[9];   
+    char dt16[17];   
     strftime(date8, sizeof(date8), "%Y%m%d",        &utc_time);
     strftime(dt16,  sizeof(dt16),  "%Y%m%dT%H%M%SZ", &utc_time);
 
-    // Build the canonical request.
+    
     std::string host         = location.bucket + ".s3." + location.region + ".amazonaws.com";
     std::string object_path  = "/" + location.key;
-    std::string payload_hash = sha256_hex("");  // Empty body for GET
+    std::string payload_hash = sha256_hex("");  
 
     std::string signed_headers = "host;x-amz-content-sha256;x-amz-date";
     std::string canonical_headers =
@@ -134,14 +134,14 @@ std::string build_s3_request_url(const S3Loc&       location,
         + signed_headers    + "\n"
         + payload_hash;
 
-    // Build the string-to-sign.
+    
     std::string credential_scope = std::string(date8) + "/" + location.region + "/s3/aws4_request";
     std::string string_to_sign   =
         "AWS4-HMAC-SHA256\n" + std::string(dt16) + "\n"
         + credential_scope   + "\n"
         + sha256_hex(canonical_request);
 
-    // Derive the signing key via a chain of HMAC-SHA256 operations.
+    
     std::string signing_key = hmac_sha256_raw(
                                   hmac_sha256_raw(
                                       hmac_sha256_raw(
@@ -155,7 +155,7 @@ std::string build_s3_request_url(const S3Loc&       location,
             hmac_sha256_raw(signing_key, string_to_sign).data()),
         32);
 
-    // Assemble the Authorization header.
+    
     out_auth_header =
         "AWS4-HMAC-SHA256 Credential=" + location.access_key_id + "/" + credential_scope + ","
         + "SignedHeaders=" + signed_headers + ","

@@ -12,12 +12,12 @@
 
 #include <curl/curl.h>
 
-// ─── libcurl write callback context ──────────────────────────────────────────
+
 
 /// Context passed to the libcurl write callback — holds a pointer to the
 /// destination byte buffer for the current request.
 struct CurlWriteContext {
-    std::vector<uint8_t>* buffer; ///< Destination for received bytes
+    std::vector<uint8_t>* buffer;
 };
 
 /// libcurl CURLOPT_WRITEFUNCTION implementation.
@@ -36,23 +36,23 @@ static size_t write_response_bytes(void* received_data,
     return total_bytes;
 }
 
-// ─── Merged byte-range request ───────────────────────────────────────────────
+
 
 /// One HTTP Range request that may cover multiple individual tile fetch jobs.
 struct MergedRangeRequest {
-    size_t           first_byte;  ///< Start of the merged byte range
-    size_t           last_byte;   ///< End   of the merged byte range (exclusive)
-    std::vector<int> job_indices; ///< Indices into the jobs[] array covered by this request
+    size_t           first_byte;
+    size_t           last_byte;
+    std::vector<int> job_indices;
 };
 
-// ─── s3_fetch_tiles ──────────────────────────────────────────────────────────
+
 
 void s3_fetch_tiles(const S3Loc&               location,
                     const std::vector<size_t>&  all_offsets,
                     const std::vector<size_t>&  all_lengths,
                     std::vector<TileFetch>&      jobs) {
 
-    // Sort jobs by byte offset so adjacent ones can be merged.
+    
     std::vector<int> sorted_job_indices(jobs.size());
     std::iota(sorted_job_indices.begin(), sorted_job_indices.end(), 0);
     std::sort(sorted_job_indices.begin(), sorted_job_indices.end(),
@@ -60,7 +60,7 @@ void s3_fetch_tiles(const S3Loc&               location,
                   return jobs[a].byte_offset < jobs[b].byte_offset;
               });
 
-    // Merge jobs whose byte ranges are within 128 KB of each other.
+    
     const size_t merge_gap_bytes = 128 * 1024;
     std::vector<MergedRangeRequest> merged_requests;
 
@@ -83,17 +83,17 @@ void s3_fetch_tiles(const S3Loc&               location,
         }
     }
 
-    // Allocate per-request response buffers and curl contexts.
+    
     size_t num_requests = merged_requests.size();
     std::vector<std::vector<uint8_t>> response_buffers(num_requests);
     std::vector<CurlWriteContext>     write_contexts(num_requests);
     std::vector<CURL*>                curl_handles(num_requests, nullptr);
 
-    // Initialise the curl multi handle.
+    
     CURLM* multi_handle = curl_multi_init();
     curl_multi_setopt(multi_handle, CURLMOPT_MAX_TOTAL_CONNECTIONS, 8L);
 
-    // Build and enqueue one easy handle per merged request.
+    
     for (size_t req_idx = 0; req_idx < num_requests; ++req_idx) {
         const MergedRangeRequest& req = merged_requests[req_idx];
 
@@ -123,17 +123,17 @@ void s3_fetch_tiles(const S3Loc&               location,
         curl_multi_add_handle(multi_handle, easy);
     }
 
-    // Run the event loop until all transfers finish.
+    
     int transfers_running = 0;
     do {
         curl_multi_perform(multi_handle, &transfers_running);
         if (transfers_running > 0) {
             int wait_result = 0;
-            curl_multi_wait(multi_handle, nullptr, 0, /*timeout_ms=*/50, &wait_result);
+            curl_multi_wait(multi_handle, nullptr, 0, 50, &wait_result);
         }
     } while (transfers_running > 0);
 
-    // Demultiplex response buffers back into individual job data.
+    
     for (size_t req_idx = 0; req_idx < num_requests; ++req_idx) {
         const MergedRangeRequest&    req    = merged_requests[req_idx];
         const std::vector<uint8_t>&  buffer = response_buffers[req_idx];

@@ -27,8 +27,8 @@
 #include "../tiff/tiff_metadata.h"
 #include "../tile_io/tile_io.h"
 
-// ─── Local GDAL dataset pool
-// ──────────────────────────────────────────────────
+
+
 
 struct DatasetPool {
   std::vector<GDALDataset *> datasets;
@@ -47,11 +47,11 @@ struct DatasetPool {
   }
 };
 
-// ─── Persistent warp thread-buffer pool ──────────────────────────────────────
-//
-// alloc_warp allocates CUDA arrays and texture objects — expensive on first
-// call. Persistent pool reuses them across repeated calls with the same raster
-// shape.
+
+
+
+
+
 
 struct WarpPoolKey {
   size_t output_band_bytes;
@@ -101,12 +101,27 @@ static std::vector<ThreadBufs> &get_persistent_warp_pool(
   return g_warp_pool;
 }
 
-// ─── run_engine_reproject ────────────────────────────────────────────────────
+void release_warp_pool() {
+  for (auto &buf : g_warp_pool) { buf.free_all(); }
+  g_warp_pool.clear();
+  g_warp_key = WarpPoolKey{0, 0, 0, false, 0, 0, 0, 0};
+}
+
+
 
 void run_engine_reproject(const std::string &input_file, PipelineCtx &ctx,
                           bool verbose) {
   GDALAllRegister();
+  
+  
+  release_halo_pool();
+  release_stack_pool();
+  release_zonal_pool();
+  g_pinned_arena.release();  
   init_ram_budget();
+  
+
+  const int num_threads_hw = std::max(1, omp_get_max_threads());
 
   FileInfo src_info = get_file_info(input_file);
   const FileInfo &out_info = ctx.reproject_output_info;
@@ -120,10 +135,7 @@ void run_engine_reproject(const std::string &input_file, PipelineCtx &ctx,
   const std::vector<int> &band_slots = ctx.band_map;
   const int num_bands = static_cast<int>(band_slots.size());
 
-  const int chunk_height = out_info.tile_height;
-  const int num_chunks = (out_info.height + chunk_height - 1) / chunk_height;
-
-  // ── Estimate input/output pixel scale ratio ────────────────────────────────
+  
 
   double h_scale = 1.0, v_scale = 1.0;
   {
@@ -155,36 +167,91 @@ void run_engine_reproject(const std::string &input_file, PipelineCtx &ctx,
     probe.destroy();
   }
 
-  // ── Canvas size bounds ─────────────────────────────────────────────────────
-
-  int max_canvas_width =
-      std::min(src_info.width, static_cast<int>(out_info.width * h_scale * 1.5 +
-                                                src_info.tile_width * 2 + 128));
-  int max_canvas_height = std::min(
-      src_info.height, static_cast<int>(chunk_height * v_scale * 1.5 +
-                                        src_info.tile_height * 2 + 128));
-
-  size_t canvas_bytes_per_thread = static_cast<size_t>(max_canvas_width) *
-                                   max_canvas_height * num_bands *
-                                   sizeof(float);
-  size_t output_band_bytes =
-      static_cast<size_t>(out_info.width) * chunk_height * sizeof(float);
-  size_t max_dst_pixels = static_cast<size_t>(out_info.width) * chunk_height;
-
-  // ── Scale thread count to fit within VRAM and pinned RAM ──────────────────
-
   size_t free_vram = 0, total_vram = 0;
   CUDA_CHECK(cudaMemGetInfo(&free_vram, &total_vram));
   size_t vram_budget = static_cast<size_t>(free_vram * 0.90);
 
-  int warp_threads = g_num_threads;
-  if (canvas_bytes_per_thread > 0) {
+  int chunk_height = out_info.tile_height;
+  {
+    int geom_canvas_w = std::min(
+        src_info.width,
+        static_cast<int>(out_info.width * h_scale * 1.5 +
+                         src_info.tile_width * 2 + 128));
+    while (chunk_height + out_info.tile_height <= out_info.height) {
+      int trial = chunk_height + out_info.tile_height;
+      int trial_canvas_h = std::min(
+          src_info.height,
+          static_cast<int>(trial * v_scale * 1.5 +
+                           src_info.tile_height * 2 + 128));
+
+      size_t trial_canvas_bytes =
+          static_cast<size_t>(geom_canvas_w) * trial_canvas_h *
+          num_bands * sizeof(float);
+      size_t trial_output_bytes =
+          static_cast<size_t>(out_info.width) * trial * num_bands * sizeof(float);
+      size_t trial_vram_per_thread = trial_canvas_bytes + trial_output_bytes;
+
+      size_t trial_pinned_per_thread =
+          static_cast<size_t>(out_info.width) * trial * sizeof(float) * num_bands
+          + static_cast<size_t>(out_info.width) * trial * sizeof(float)
+          + trial_canvas_bytes;
+
+      if (trial_vram_per_thread * num_threads_hw > vram_budget) break;
+      if (trial_pinned_per_thread * num_threads_hw > g_pinned_budget)  break;
+      chunk_height = trial;
+    }
+  }
+
+  const int num_chunks = (out_info.height + chunk_height - 1) / chunk_height;
+
+  int geom_canvas_w = std::min(
+      src_info.width,
+      static_cast<int>(out_info.width * h_scale * 1.5 +
+                       src_info.tile_width * 2 + 128));
+  int geom_canvas_h = std::min(
+      src_info.height,
+      static_cast<int>(chunk_height * v_scale * 1.5 +
+                       src_info.tile_height * 2 + 128));
+
+  size_t output_bytes_per_thread =
+      static_cast<size_t>(out_info.width) * chunk_height * num_bands * sizeof(float);
+  size_t vram_left_for_canvas =
+      (vram_budget > output_bytes_per_thread * num_threads_hw)
+          ? (vram_budget - output_bytes_per_thread * num_threads_hw) / num_threads_hw
+          : size_t{0};
+  size_t max_canvas_pixels_vram =
+      (num_bands > 0 && sizeof(float) > 0)
+          ? vram_left_for_canvas / (num_bands * sizeof(float))
+          : static_cast<size_t>(geom_canvas_w) * geom_canvas_h;
+
+  int max_canvas_width  = geom_canvas_w;
+  int max_canvas_height = geom_canvas_h;
+  size_t geom_pixels = static_cast<size_t>(geom_canvas_w) * geom_canvas_h;
+  if (geom_pixels > max_canvas_pixels_vram && max_canvas_pixels_vram > 0) {
+    double scale = std::sqrt((double)max_canvas_pixels_vram / (double)geom_pixels);
+    max_canvas_width  = std::max(1, static_cast<int>(geom_canvas_w  * scale));
+    max_canvas_height = std::max(1, static_cast<int>(geom_canvas_h  * scale));
+  }
+
+  size_t canvas_bytes_per_thread = static_cast<size_t>(max_canvas_width) *
+                                   max_canvas_height * num_bands * sizeof(float);
+  size_t output_band_bytes =
+      static_cast<size_t>(out_info.width) * chunk_height * sizeof(float);
+  size_t max_dst_pixels = static_cast<size_t>(out_info.width) * chunk_height;
+
+  size_t vram_per_thread_total =
+      canvas_bytes_per_thread +
+      max_dst_pixels * num_bands * sizeof(float);
+
+  int warp_threads = num_threads_hw;
+  if (vram_per_thread_total > 0) {
     warp_threads = std::min(
-        warp_threads, static_cast<int>(std::max(
-                          size_t{1}, vram_budget / canvas_bytes_per_thread)));
+        warp_threads,
+        static_cast<int>(std::max(size_t{1},
+                                  vram_budget / vram_per_thread_total)));
   }
   size_t pinned_per_thread =
-      output_band_bytes * num_bands + canvas_bytes_per_thread;
+      output_band_bytes * num_bands + output_band_bytes + canvas_bytes_per_thread;
   if (pinned_per_thread > 0) {
     warp_threads =
         std::min(warp_threads,
@@ -198,21 +265,21 @@ void run_engine_reproject(const std::string &input_file, PipelineCtx &ctx,
     fflush(stdout);
   }
 
-  // ── Persistent warp thread pool ────────────────────────────────────────────
+  
 
   auto &thread_pool = get_persistent_warp_pool(
       output_band_bytes, num_bands, warp_threads, ctx.has_clip_mask,
       chunk_height, max_canvas_width, max_canvas_height, max_dst_pixels,
       ctx.reproject_params.resampling);
 
-  // ── Per-call WarpTransformers (cheap to init, not worth caching) ──────────
+  
 
   std::vector<WarpTransformer> transformers(warp_threads);
   for (int t = 0; t < warp_threads; ++t) {
     transformers[t].initialise(src_info, out_info);
   }
 
-  // ── Open GDAL datasets (non-S3) ───────────────────────────────────────────
+  
 
   std::vector<int> gdal_band_nums(num_bands);
   for (int b = 0; b < num_bands; ++b) {
@@ -234,7 +301,7 @@ void run_engine_reproject(const std::string &input_file, PipelineCtx &ctx,
     }
   }
 
-  // ── Upload compiled algebra program to the GPU ─────────────────────────────
+  
 
   Instruction *d_instructions = nullptr;
   if (!ctx.instructions.empty()) {
@@ -257,10 +324,10 @@ void run_engine_reproject(const std::string &input_file, PipelineCtx &ctx,
     GDALTermProgress(0.0, nullptr, &progress_state);
   }
 
-  // ── Parallel chunk processing ──────────────────────────────────────────────
+  
 
-  omp_set_num_threads(warp_threads);
-#pragma omp parallel for schedule(dynamic, 1)
+  
+#pragma omp parallel for num_threads(warp_threads) schedule(dynamic, 1)
   for (int chunk = 0; chunk < num_chunks; ++chunk) {
     int thread_id = omp_get_thread_num();
     int chunk_y0 = chunk * chunk_height;
@@ -268,14 +335,14 @@ void run_engine_reproject(const std::string &input_file, PipelineCtx &ctx,
     ThreadBufs &buf = thread_pool[thread_id];
     WarpTransformer &warp = transformers[thread_id];
 
-    // ── Phase 1: Build coarse grid ─────────────────────────────────────────
+    
 
     double coarse_grid_x[WARP_GRID_WIDTH * WARP_GRID_HEIGHT];
     double coarse_grid_y[WARP_GRID_WIDTH * WARP_GRID_HEIGHT];
     compute_coarse_grid(warp, chunk_y0, cur_height, out_info.width,
                         coarse_grid_x, coarse_grid_y);
 
-    // ── Phase 2: Derive source canvas bounding box ────────────────────────
+    
 
     SrcBBox canvas_bbox = coarse_grid_to_source_bbox(
         coarse_grid_x, coarse_grid_y, src_info.width, src_info.height);
@@ -289,7 +356,7 @@ void run_engine_reproject(const std::string &input_file, PipelineCtx &ctx,
       coarse_y_f[i] = static_cast<float>(coarse_grid_y[i] - canvas_bbox.y0);
     }
 
-    // ── Phase 3: Read source canvas from GDAL or S3 ───────────────────────
+    
 
     memset(buf.h_src_canvas, 0,
            static_cast<size_t>(canvas_bbox.w) * canvas_bbox.h * num_bands *
@@ -426,7 +493,7 @@ void run_engine_reproject(const std::string &input_file, PipelineCtx &ctx,
       }
     }
 
-    // ── Phase 4: Upload coarse grid and canvas textures to GPU ────────────
+    
 
     CUDA_CHECK(cudaMemcpyAsync(buf.d_coarse_x, coarse_x_f, coarse_grid_bytes,
                                cudaMemcpyHostToDevice, buf.cuda_stream));
@@ -435,7 +502,7 @@ void run_engine_reproject(const std::string &input_file, PipelineCtx &ctx,
     buf.bind_src_canvas(num_bands, canvas_bbox.w, canvas_bbox.h,
                         buf.cuda_stream);
 
-    // ── Phase 5: Launch warp kernel ───────────────────────────────────────
+    
 
     launch_warp_kernel(
         buf.d_coarse_x, buf.d_coarse_y,
@@ -445,7 +512,7 @@ void run_engine_reproject(const std::string &input_file, PipelineCtx &ctx,
         static_cast<float>(ctx.reproject_params.nodata_value),
         static_cast<size_t>(out_info.width) * chunk_height, buf.cuda_stream);
 
-    // ── Phase 6: Launch algebra kernel ────────────────────────────────────
+    
 
     size_t dst_pixels = static_cast<size_t>(out_info.width) * cur_height;
     launch_raster_algebra(
@@ -453,7 +520,7 @@ void run_engine_reproject(const std::string &input_file, PipelineCtx &ctx,
         const_cast<const float *const *>(buf.d_warp_band_ptrs), buf.d_output,
         dst_pixels, buf.cuda_stream);
 
-    // ── Phase 7: Launch mask kernel (if clip is active) ───────────────────
+    
 
     if (ctx.has_clip_mask && buf.d_clip_spans) {
       memset(buf.h_clip_spans, 0, cur_height * sizeof(GpuSpanRow));
@@ -467,7 +534,7 @@ void run_engine_reproject(const std::string &input_file, PipelineCtx &ctx,
                         buf.d_clip_spans, buf.cuda_stream);
     }
 
-    // ── Phase 8: Synchronise and deliver results ───────────────────────────
+    
 
     CUDA_CHECK(cudaStreamSynchronize(buf.cuda_stream));
 

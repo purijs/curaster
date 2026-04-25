@@ -10,7 +10,7 @@
 #include "gdal_priv.h"
 #include "cpl_string.h"
 
-// ─── FileInfo extraction ──────────────────────────────────────────────────────
+
 
 FileInfo get_file_info(const std::string& file_path) {
     GDALAllRegister();
@@ -23,12 +23,12 @@ FileInfo get_file_info(const std::string& file_path) {
 
     FileInfo info;
 
-    // ── Raster dimensions ──────────────────────────────────────────────────
+    
     info.width  = dataset->GetRasterXSize();
     info.height = dataset->GetRasterYSize();
     info.samples_per_pixel = dataset->GetRasterCount();
 
-    // ── Geotransform and projection ────────────────────────────────────────
+    
     double gt[6];
     dataset->GetGeoTransform(gt);
     memcpy(info.geo_transform, gt, sizeof(gt));
@@ -36,7 +36,7 @@ FileInfo get_file_info(const std::string& file_path) {
     const char* wkt = dataset->GetProjectionRef();
     info.projection = wkt ? wkt : "";
 
-    // ── Block / tile layout ────────────────────────────────────────────────
+    
     GDALRasterBand* first_band = dataset->GetRasterBand(1);
     info.data_type = static_cast<int>(first_band->GetRasterDataType());
 
@@ -51,14 +51,14 @@ FileInfo get_file_info(const std::string& file_path) {
         info.rows_per_strip = block_height;
     }
 
-    // ── Storage layout ─────────────────────────────────────────────────────
+    
     const char* interleave_str = dataset->GetMetadataItem("INTERLEAVE", "IMAGE_STRUCTURE");
     info.interleave = interleave_str ? interleave_str : "BAND";
 
     const char* compression_str = dataset->GetMetadataItem("COMPRESSION", "IMAGE_STRUCTURE");
     info.compression = compression_str ? compression_str : "NONE";
 
-    // Extract the PREDICTOR tag from the IMAGE_STRUCTURE metadata domain.
+    
     char** structure_meta = dataset->GetMetadata("IMAGE_STRUCTURE");
     if (structure_meta) {
         for (int i = 0; structure_meta[i] != nullptr; ++i) {
@@ -73,14 +73,15 @@ FileInfo get_file_info(const std::string& file_path) {
     return info;
 }
 
-// ─── Output dataset creation ──────────────────────────────────────────────────
 
-GDALDataset* create_output_dataset(const std::string& output_path, const FileInfo& info) {
+
+GDALDataset* create_output_dataset(const std::string& output_path, const FileInfo& info,
+                                   int nBands) {
     GDALAllRegister();
 
     auto* driver = static_cast<GDALDriver*>(GDALGetDriverByName("GTiff"));
 
-    // Build creation options: tiled BigTIFF with DEFLATE + float predictor.
+    
     char** creation_options = nullptr;
     creation_options = CSLSetNameValue(creation_options, "TILED",     "YES");
     creation_options = CSLSetNameValue(creation_options, "BLOCKXSIZE","512");
@@ -92,7 +93,7 @@ GDALDataset* create_output_dataset(const std::string& output_path, const FileInf
     GDALDataset* output_dataset = driver->Create(
         output_path.c_str(),
         info.width, info.height,
-        /*nBands=*/1, GDT_Float32,
+        nBands, GDT_Float32,
         creation_options);
 
     CSLDestroy(creation_options);

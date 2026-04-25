@@ -5,6 +5,12 @@
 #include <string>
 #include <thread>
 #include <vector>
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 #include "gdal_priv.h"
 #include "cpl_vsi.h"
@@ -24,7 +30,7 @@
 #include "../engine/engine_zonal.h"
 #include "../reproject/reproject.h"
 
-// ─── Construction ─────────────────────────────────────────────────────────────
+
 
 Chain::Chain(const std::string& input_file)
     : input_file_(input_file) {}
@@ -33,7 +39,7 @@ Chain::Chain(const Chain& other)
     : input_file_(other.input_file_)
     , operations_(other.operations_) {}
 
-// ─── Private helpers ─────────────────────────────────────────────────────────
+
 
 bool Chain::has_reproject_operation() const {
     for (const auto& op : operations_) {
@@ -52,7 +58,7 @@ FileInfo Chain::get_output_info() const {
     return src_info;
 }
 
-// ─── Pipeline context assembly ────────────────────────────────────────────────
+
 
 static PipelineCtx build_pipeline_context(const std::vector<ChainOp>& operations,
                                            const FileInfo&              src_info,
@@ -122,7 +128,7 @@ static PipelineCtx build_pipeline_context(const std::vector<ChainOp>& operations
     return ctx;
 }
 
-// ─── execute ──────────────────────────────────────────────────────────────────
+
 
 void Chain::execute(GDALRasterBand*             output_band,
                     RasterResult*               result,
@@ -131,26 +137,37 @@ void Chain::execute(GDALRasterBand*             output_band,
     FileInfo   src_info = get_file_info(input_file_);
     PipelineCtx ctx     = build_pipeline_context(operations_, src_info, input_file_);
     const FileInfo& out_info = ctx.has_reproject ? ctx.reproject_output_info : src_info;
-    (void)out_info; // reserved for future chunk-size calculations
+    (void)out_info; 
 
-    // Wire up result destinations.
+    int num_out_bands = ctx.focal_num_output_bands;
+    if (!ctx.has_focal && !ctx.has_terrain && !ctx.has_texture) num_out_bands = 1;
+
     if (output_band) {
         ctx.output_band = output_band;
     }
     if (result) {
-        ctx.result_callback = [result](int width, int height, float* pixels, int y_offset) {
-            memcpy(result->data.data() + static_cast<size_t>(y_offset) * width,
-                   pixels,
-                   static_cast<size_t>(width) * height * sizeof(float));
+        int total_width  = result->width;
+        int total_height = result->height;
+        int bands        = result->bands;
+        ctx.result_callback = [result, total_width, total_height, bands]
+                              (int width, int height, float* pixels, int y_offset) {
+            size_t chunk_pixels = static_cast<size_t>(width) * height;
+            size_t total_pixels = static_cast<size_t>(total_width) * total_height;
+            for (int b = 0; b < bands; ++b) {
+                memcpy(result->data.data() + b * total_pixels
+                                           + static_cast<size_t>(y_offset) * width,
+                       pixels + b * chunk_pixels,
+                       chunk_pixels * sizeof(float));
+            }
         };
     }
     if (chunk_queue) {
-        ctx.queue_callback = [chunk_queue](int width, int height, float* pixels, int y_offset) {
+        ctx.queue_callback = [chunk_queue, num_out_bands](int width, int height, float* pixels, int y_offset) {
             ChunkResult chunk;
             chunk.width    = width;
             chunk.height   = height;
             chunk.y_offset = y_offset;
-            chunk.data.assign(pixels, pixels + static_cast<size_t>(width) * height);
+            chunk.data.assign(pixels, pixels + static_cast<size_t>(width) * height * num_out_bands);
             chunk_queue->push(std::move(chunk));
         };
     }
@@ -288,37 +305,51 @@ std::vector<ZoneResult> Chain::zonal_stats(const std::string& geojson_str,
 }
 
 
-// ─── Terminal methods ─────────────────────────────────────────────────────────
+
 
 void Chain::save_local(const std::string& output_path, bool verbose) {
-    FileInfo      out_info  = get_output_info();
-    GDALDataset*  output_ds = create_output_dataset(output_path, out_info);
-    GDALRasterBand* out_band = output_ds->GetRasterBand(1);
-    execute(out_band, nullptr, nullptr, verbose);
+    FileInfo src_info  = get_file_info(input_file_);
+    PipelineCtx ctx    = build_pipeline_context(operations_, src_info, input_file_);
+    int num_out_bands  = ctx.focal_num_output_bands;
+    if (!ctx.has_focal && !ctx.has_terrain && !ctx.has_texture) num_out_bands = 1;
+
+    FileInfo out_info  = get_output_info();
+    GDALDataset* output_ds = create_output_dataset(output_path, out_info, num_out_bands);
+
+    if (num_out_bands == 1) {
+        GDALRasterBand* out_band = output_ds->GetRasterBand(1);
+        execute(out_band, nullptr, nullptr, verbose);
+    } else {
+        ctx.output_dataset = static_cast<void*>(output_ds);
+        run_engine_focal(input_file_, ctx, verbose);
+    }
     GDALClose(output_ds);
 }
 
 void Chain::save_s3(const std::string& s3_path, bool verbose) {
-    // Materialise to memory first, then upload via GDAL's /vsis3/ virtual FS.
-    auto result = to_memory(verbose);
+    // Write to a real disk temp file first (chunk-by-chunk, no RAM accumulation),
+    // then upload to S3 as a single sequential copy.  This avoids GDAL buffering
+    // the whole output in /vsimem/ when CPL_VSIL_USE_TEMP_FILE_FOR_RANDOM_WRITE=YES.
+#ifdef _WIN32
+    char tmp_dir[MAX_PATH];
+    GetTempPathA(MAX_PATH, tmp_dir);
+    std::string tmp_path = std::string(tmp_dir) + "curaster_s3_"
+                         + std::to_string(GetCurrentProcessId()) + ".tif";
+#else
+    std::string tmp_path = std::string("/tmp/curaster_s3_") + std::to_string(getpid()) + ".tif";
+#endif
 
-    if (!result || result->data.empty()) {
-        throw std::runtime_error("write_s3: empty result — nothing to upload.");
+    try {
+        save_local(tmp_path, verbose);
+    } catch (...) {
+        VSIUnlink(tmp_path.c_str());
+        throw;
     }
 
-    // Write to a temp file then copy to S3 via CPLCopyFile.
-    const char* cpl_tmp = CPLGenerateTempFilename("curaster");
-    std::string tmp_path = std::string(cpl_tmp) + ".tif";
-
-    GDALDataset* tmp_ds = create_output_dataset(tmp_path, result->file_info);
-    if (!tmp_ds) {
-        throw std::runtime_error("Cannot create temporary file for S3 upload.");
+    if (verbose) {
+        printf("\n[save_s3] Uploading %s → %s\n", tmp_path.c_str(), s3_path.c_str());
+        fflush(stdout);
     }
-    (void)tmp_ds->GetRasterBand(1)->RasterIO(
-        GF_Write, 0, 0, result->width, result->height,
-        result->data.data(), result->width, result->height,
-        GDT_Float32, 0, 0);
-    GDALClose(tmp_ds);
 
     if (CPLCopyFile(s3_path.c_str(), tmp_path.c_str()) != 0) {
         VSIUnlink(tmp_path.c_str());
@@ -329,26 +360,61 @@ void Chain::save_s3(const std::string& s3_path, bool verbose) {
 }
 
 std::shared_ptr<RasterResult> Chain::to_memory(bool verbose) {
+    FileInfo src_info  = get_file_info(input_file_);
+    PipelineCtx tmp_ctx = build_pipeline_context(operations_, src_info, input_file_);
+    int num_out_bands  = tmp_ctx.focal_num_output_bands;
+    if (!tmp_ctx.has_focal && !tmp_ctx.has_terrain && !tmp_ctx.has_texture) num_out_bands = 1;
+
     FileInfo out_info = get_output_info();
 
-    size_t required_bytes   = static_cast<size_t>(out_info.width)
-                            * static_cast<size_t>(out_info.height) * sizeof(float);
-    size_t safe_ram_limit   = static_cast<size_t>(get_available_ram() * 0.75);
+    size_t required_bytes = static_cast<size_t>(out_info.width)
+                          * static_cast<size_t>(out_info.height)
+                          * num_out_bands * sizeof(float);
+
+    // Dynamic RAM budget: engine_focal/terrain/texture pre-claims 90% of available RAM
+    // for its pinned halo pool (init_ram_budget). The output array must fit in the
+    // remaining headroom. Plain algebra/clip/reproject pipelines can use most of RAM.
+    double ram_fraction;
+    if (tmp_ctx.has_focal || tmp_ctx.has_terrain || tmp_ctx.has_texture) {
+        // engine_focal claims 0.90 * available_ram → only 0.10 left for output
+        // Use 0.08 to stay safely below that ceiling.
+        ram_fraction = 0.08;
+    } else if (tmp_ctx.has_temporal) {
+        // Temporal loads N full-scene buffers simultaneously.
+        ram_fraction = 0.25;
+    } else {
+        // Simple algebra / clip / reproject — very little internal overhead.
+        ram_fraction = 0.70;
+    }
+
+    size_t safe_ram_limit = static_cast<size_t>(get_available_ram() * ram_fraction);
 
     if (required_bytes > safe_ram_limit) {
         throw std::runtime_error(
             "MemoryError: raster requires " + std::to_string(required_bytes / 1048576)
             + " MB but only " + std::to_string(safe_ram_limit / 1048576)
-            + " MB is safely available. Use iter_begin() to stream chunks instead.");
+            + " MB is safely available for output allocation (pipeline mode: "
+            + (tmp_ctx.has_focal || tmp_ctx.has_terrain || tmp_ctx.has_texture
+                ? "focal/terrain/texture" : tmp_ctx.has_temporal ? "temporal" : "standard")
+            + "). Use iter_begin() to stream chunks instead.");
     }
 
     auto result      = std::make_shared<RasterResult>();
     result->width    = out_info.width;
     result->height   = out_info.height;
+    result->bands    = num_out_bands;
     result->file_info   = out_info;
     result->projection  = out_info.projection;
     memcpy(result->geo_transform, out_info.geo_transform, sizeof(out_info.geo_transform));
-    result->allocate();
+
+    try {
+        result->allocate();
+    } catch (const std::bad_alloc&) {
+        throw std::runtime_error(
+            "MemoryError: raster requires " +
+            std::to_string(required_bytes / 1048576) +
+            " MB but allocation failed. Use iter_begin() to stream chunks instead.");
+    }
 
     execute(nullptr, result.get(), nullptr, verbose);
     return result;
@@ -362,7 +428,7 @@ std::shared_ptr<ChunkQueue> Chain::iter_begin(int buffer_chunk_count) {
         try {
             chain_copy.execute(nullptr, nullptr, queue);
         } catch (...) {
-            // Swallow exceptions in the background thread; the queue will signal EOF.
+            
         }
         queue->finish();
     }).detach();

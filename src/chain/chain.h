@@ -21,7 +21,7 @@ public:
     Chain(const Chain& other);
 
 
-    // ── Builder methods (return a new Chain) ──────────────────────────────
+    
 
     /**
      * @brief Append a band-math algebra operation.
@@ -87,7 +87,7 @@ public:
      */
     FileInfo get_output_info() const;
 
-    // ── Terminal methods ──────────────────────────────────────────────────
+    
 
     /// Execute the pipeline and write results to a local GeoTIFF file.
     void save_local(const std::string& output_path, bool verbose = false);
@@ -110,8 +110,8 @@ public:
     std::shared_ptr<ChunkQueue> iter_begin(int buffer_chunk_count = 4);
 
 private:
-    std::string            input_file_; ///< Path to the source GeoTIFF
-    std::vector<ChainOp>   operations_; ///< Ordered list of lazy operations
+    std::string            input_file_;
+    std::vector<ChainOp>   operations_;
 
     /// True if this chain contains a REPROJECT operation.
     bool has_reproject_operation() const;

@@ -8,10 +8,10 @@
  */
 #pragma once
 
-#include <cstdint>  // uint8_t
+#include <cstdint>  
 #include <string>
 #include <vector>
-#include "../../include/types.h"  // FileInfo, SrcBBox
+#include "../../include/types.h"  
 
 /**
  * @brief Decompress one tile / strip block and return it as float32 pixels.

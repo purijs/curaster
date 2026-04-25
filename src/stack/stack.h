@@ -2,8 +2,8 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include "../../include/pipeline.h"  // TemporalOp, TemporalParams, ChainOp, FileInfo
-#include "../../include/types.h"     // RasterResult
+#include "../../include/pipeline.h"  
+#include "../../include/types.h"     
 
 class Chain;
 
@@ -17,8 +17,8 @@ public:
                                            const std::string& resampling = "bilinear",
                                            double nodata = -9999.0);
 
-    // Reduces the N-scene stack to one raster and returns a chainable Chain.
-    // op: diff, ratio, anomaly_mean, anomaly_baseline, trend, mean, std, min, max
+    
+    
     std::shared_ptr<Chain> temporal(const std::string& op,
                                      int t0 = 0, int t1 = -1,
                                      const std::string& baseline = "mean",

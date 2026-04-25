@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-// ─── Operator precedence ──────────────────────────────────────────────────────
+
 
 /// Return the precedence level of an infix operator token (0 = not an operator).
 static int operator_precedence(const std::string& token) {
@@ -20,7 +20,7 @@ static int operator_precedence(const std::string& token) {
     return 0;
 }
 
-// ─── Opcode emission ──────────────────────────────────────────────────────────
+
 
 /// Map an operator token string to its Opcode and append the instruction.
 static void emit_operator(const std::string& token, std::vector<Instruction>& output) {
@@ -35,12 +35,12 @@ static void emit_operator(const std::string& token, std::vector<Instruction>& ou
     else if (token == "<=") { op = OP_LTE; }
     else if (token == "==") { op = OP_EQ;  }
     else if (token == "!=") { op = OP_NEQ; }
-    else { return; } // Unrecognised token — skip silently.
+    else { return; } 
 
     output.push_back({op, 0.0f, -1});
 }
 
-// ─── Tokeniser ────────────────────────────────────────────────────────────────
+
 
 /**
  * @brief Split the expression into atomic tokens.
@@ -65,7 +65,7 @@ static std::vector<std::string> tokenise(const std::string& expression) {
             continue;
         }
 
-        // These characters are always single-token delimiters.
+        
         bool is_single_char_token =
             ch == '+' || ch == '-' || ch == '*' || ch == '/'
          || ch == '(' || ch == ')' || ch == ','
@@ -80,7 +80,7 @@ static std::vector<std::string> tokenise(const std::string& expression) {
     }
     flush_word();
 
-    // Merge two-character comparison tokens (e.g. ">" followed by "=").
+    
     std::vector<std::string> merged;
     for (size_t i = 0; i < tokens.size(); ) {
         if (i + 1 < tokens.size()) {
@@ -96,23 +96,23 @@ static std::vector<std::string> tokenise(const std::string& expression) {
     return merged;
 }
 
-// ─── compile_algebra_expression ──────────────────────────────────────────────
+
 
 std::vector<Instruction> compile_algebra_expression(const std::string& expression,
                                                      std::vector<int>&  band_map) {
     std::vector<std::string> tokens = tokenise(expression);
 
-    // Shunting-yard algorithm — builds postfix output from infix tokens.
+    
     std::vector<Instruction> output_queue;
     std::vector<std::string> operator_stack;
 
     for (const std::string& token : tokens) {
 
-        // ── Band reference: B1, B2, … ────────────────────────────────────
+        
         if (token.size() >= 2 && token[0] == 'B' && std::isdigit(token[1])) {
-            int physical_index = std::stoi(token.substr(1)) - 1; // Convert to 0-based
+            int physical_index = std::stoi(token.substr(1)) - 1; 
 
-            // Deduplicate: reuse existing slot or append a new one.
+            
             auto existing = std::find(band_map.begin(), band_map.end(), physical_index);
             int  slot_index;
             if (existing != band_map.end()) {
@@ -126,7 +126,7 @@ std::vector<Instruction> compile_algebra_expression(const std::string& expressio
             continue;
         }
 
-        // ── Numeric literal ───────────────────────────────────────────────
+        
         bool is_number = std::isdigit(static_cast<unsigned char>(token[0]))
                       || (token[0] == '-' && token.size() > 1)
                       || token[0] == '.';
@@ -136,25 +136,25 @@ std::vector<Instruction> compile_algebra_expression(const std::string& expressio
             continue;
         }
 
-        // ── Left parenthesis ──────────────────────────────────────────────
+        
         if (token == "(") {
             operator_stack.push_back(token);
             continue;
         }
 
-        // ── Right parenthesis: flush operators to matching left paren ─────
+        
         if (token == ")") {
             while (!operator_stack.empty() && operator_stack.back() != "(") {
                 emit_operator(operator_stack.back(), output_queue);
                 operator_stack.pop_back();
             }
             if (!operator_stack.empty()) {
-                operator_stack.pop_back(); // Discard the "("
+                operator_stack.pop_back(); 
             }
             continue;
         }
 
-        // ── Infix operator ────────────────────────────────────────────────
+        
         if (operator_precedence(token) > 0) {
             while (!operator_stack.empty()
                    && operator_precedence(operator_stack.back()) >= operator_precedence(token)) {
@@ -165,7 +165,7 @@ std::vector<Instruction> compile_algebra_expression(const std::string& expressio
         }
     }
 
-    // Drain the operator stack.
+    
     while (!operator_stack.empty()) {
         if (operator_stack.back() != "(") {
             emit_operator(operator_stack.back(), output_queue);

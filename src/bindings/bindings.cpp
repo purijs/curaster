@@ -41,7 +41,7 @@ PYBIND11_MODULE(curaster, module) {
         return make_stack(files);
     }, py::arg("files"), "Open multiple co-registered GeoTIFFs as a StackChain.");
 
-    // ── Chain ─────────────────────────────────────────────────────────────────
+    
     py::class_<Chain, std::shared_ptr<Chain>>(module, "Chain")
         .def("algebra",   &Chain::algebra,  py::arg("expression"))
         .def("clip",      &Chain::clip,     py::arg("geojson"))
@@ -103,7 +103,7 @@ PYBIND11_MODULE(curaster, module) {
         .def("iter_begin", &Chain::iter_begin,
              py::arg("buf_chunks") = 4);
 
-    // ── StackChain ────────────────────────────────────────────────────────────
+    
     py::class_<StackChain, std::shared_ptr<StackChain>>(module, "StackChain")
         .def("algebra",  &StackChain::algebra,  py::arg("expression"))
         .def("reproject", &StackChain::reproject,
@@ -121,19 +121,28 @@ PYBIND11_MODULE(curaster, module) {
              "Reduce the scene stack to a single output via a temporal operation.\n"
              "op: diff, ratio, anomaly_mean, trend, mean, std, min, max");
 
-    // ── RasterResult ──────────────────────────────────────────────────────────
+    
     py::class_<RasterResult, std::shared_ptr<RasterResult>>(module, "RasterResult")
         .def_readonly("width",  &RasterResult::width)
         .def_readonly("height", &RasterResult::height)
+        .def_readonly("bands",  &RasterResult::bands)
         .def_readonly("proj",   &RasterResult::projection)
-        .def("data", [](const RasterResult& result) {
-            return py::array_t<float>(
-                { static_cast<py::ssize_t>(result.height),
-                  static_cast<py::ssize_t>(result.width) },
-                result.data.data());
+        .def("data", [](const RasterResult& result) -> py::object {
+            if (result.bands <= 1) {
+                return py::array_t<float>(
+                    { static_cast<py::ssize_t>(result.height),
+                      static_cast<py::ssize_t>(result.width) },
+                    result.data.data());
+            } else {
+                return py::array_t<float>(
+                    { static_cast<py::ssize_t>(result.bands),
+                      static_cast<py::ssize_t>(result.height),
+                      static_cast<py::ssize_t>(result.width) },
+                    result.data.data());
+            }
         });
 
-    // ── ZoneResult ────────────────────────────────────────────────────────────
+    
     py::class_<ZoneResult>(module, "ZoneResult")
         .def_readonly("zone_id", &ZoneResult::zone_id)
         .def_readonly("mean",    &ZoneResult::mean)
@@ -154,7 +163,7 @@ PYBIND11_MODULE(curaster, module) {
             return d;
         });
 
-    // ── ChunkQueue ────────────────────────────────────────────────────────────
+    
     py::class_<ChunkQueue, std::shared_ptr<ChunkQueue>>(module, "ChunkQueue")
         .def("next", [](ChunkQueue& queue) -> py::object {
             ChunkResult chunk;
@@ -165,11 +174,26 @@ PYBIND11_MODULE(curaster, module) {
                 delete static_cast<std::vector<float>*>(ptr);
             });
 
-            py::array_t<float> array(
-                { static_cast<py::ssize_t>(chunk.height),
-                  static_cast<py::ssize_t>(chunk.width) },
-                owned_buffer->data(),
-                buffer_capsule);
+            size_t num_pixels = static_cast<size_t>(chunk.width) * chunk.height;
+            int num_bands = (num_pixels > 0)
+                          ? static_cast<int>(owned_buffer->size() / num_pixels)
+                          : 1;
+
+            py::array_t<float> array;
+            if (num_bands <= 1) {
+                array = py::array_t<float>(
+                    { static_cast<py::ssize_t>(chunk.height),
+                      static_cast<py::ssize_t>(chunk.width) },
+                    owned_buffer->data(),
+                    buffer_capsule);
+            } else {
+                array = py::array_t<float>(
+                    { static_cast<py::ssize_t>(num_bands),
+                      static_cast<py::ssize_t>(chunk.height),
+                      static_cast<py::ssize_t>(chunk.width) },
+                    owned_buffer->data(),
+                    buffer_capsule);
+            }
 
             py::dict result_dict;
             result_dict["y_offset"] = chunk.y_offset;

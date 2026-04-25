@@ -7,8 +7,8 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
-#include "../../include/raster_core.h"  // GpuSpanRow
-#include "../../include/types.h"        // FileInfo
+#include "../../include/raster_core.h"  
+#include "../../include/types.h"        
 
 /**
  * @brief Convert a GeoJSON polygon/multipolygon into per-row GPU span rows.

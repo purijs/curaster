@@ -12,11 +12,11 @@
  */
 #pragma once
 
-#include "../../include/types.h"     // FileInfo, SrcBBox
+#include "../../include/types.h"     
 
-struct ReprojectParams; // Defined in pipeline.h
+struct ReprojectParams; 
 
-// ─── Pre-pass: compute output FileInfo ──────────────────────────────────────
+
 
 /**
  * @brief Determine the output raster extent and resolution for a reprojection.
@@ -33,7 +33,7 @@ FileInfo pre_pass_reproject(const std::string&     input_file,
                             const FileInfo&        src_info,
                             const ReprojectParams& params);
 
-// ─── Per-chunk coordinate transformer ────────────────────────────────────────
+
 
 /**
  * @brief Encapsulates the OGR coordinate transformation for one worker thread.
@@ -64,12 +64,12 @@ public:
     void destroy();
 
 private:
-    void*  ogr_transform_ = nullptr;  ///< OGRCoordinateTransformation* (held as void* to avoid GDAL in header)
-    double src_inv_geotransform_[6];  ///< Inverse geotransform of the source raster
-    double dst_geotransform_[6];      ///< Forward geotransform of the destination raster
+    void*  ogr_transform_ = nullptr;
+    double src_inv_geotransform_[6];
+    double dst_geotransform_[6];
 };
 
-// ─── Per-chunk coarse grid ────────────────────────────────────────────────────
+
 
 /**
  * @brief Fill the 32×32 coarse warp grid with source-pixel coordinates.

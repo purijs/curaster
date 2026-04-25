@@ -44,7 +44,7 @@ void build_terrain_params(TerrainParams& tp,
     tp.features_mask = 0;
     tp.num_output_bands = 0;
 
-    // Cell size from geotransform
+    
     double gt1 = src_info.geo_transform[1];
     double gt2 = src_info.geo_transform[2];
     double gt4 = src_info.geo_transform[4];
@@ -53,7 +53,7 @@ void build_terrain_params(TerrainParams& tp,
     double cs_x = std::sqrt(gt1*gt1 + gt4*gt4);
     double cs_y = std::sqrt(gt2*gt2 + gt5*gt5);
 
-    // CRS-aware conversion if geographic (degrees → meters)
+    
     if (!src_info.projection.empty()) {
         OGRSpatialReference srs;
         srs.SetFromUserInput(src_info.projection.c_str());

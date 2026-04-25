@@ -17,7 +17,7 @@
 #include <thread>
 #include <unordered_map>
 
-// ─── StackChain ───────────────────────────────────────────────────────────────
+
 
 StackChain::StackChain(const std::vector<std::string>& files)
     : files_(files)
@@ -74,13 +74,13 @@ std::shared_ptr<StackChain> StackChain::reproject(const std::string& target_crs,
     return s;
 }
 
-// ─── StackChain::temporal ────────────────────────────────────────────────────
-// Maps the user-facing op string to TemporalOp enum, builds TemporalParams,
-// runs engine_temporal, then returns a Chain over an in-memory result.
+
+
+
 
 std::shared_ptr<Chain> StackChain::temporal(const std::string& op_str,
                                               int t0, int t1,
-                                              const std::string& /*baseline*/,
+                                              const std::string& ,
                                               const std::vector<float>& time_values)
 {
     static const std::unordered_map<std::string, TemporalOp> OP_MAP = {
@@ -108,7 +108,7 @@ std::shared_ptr<Chain> StackChain::temporal(const std::string& op_str,
     tp.t1_idx      = (t1 < 0) ? (N - 1) : t1;
     tp.time_values = time_values;
 
-    // Pre-compute OLS denominator for TREND
+    
     if (tp.op == TemporalOp::TREND) {
         std::vector<float> tv = time_values;
         if (tv.empty()) {
@@ -120,14 +120,14 @@ std::shared_ptr<Chain> StackChain::temporal(const std::string& op_str,
         for (float t : tv) { sum_t += t; sum_t2 += t * t; }
         float denom = n * sum_t2 - sum_t * sum_t;
         tp.denominator  = (std::fabs(denom) > 1e-10f) ? denom : 1.f;
-        tp.time_values  = tv; // store the filled version
+        tp.time_values  = tv; 
     }
 
-    // Build a minimal PipelineCtx so engine_temporal can deliver results
+    
     const FileInfo& ref = file_infos_[0];
     size_t total_pixels = (size_t)ref.width * ref.height;
 
-    // Allocate result
+    
     auto result = std::make_shared<RasterResult>();
     result->width      = ref.width;
     result->height     = ref.height;
@@ -148,8 +148,8 @@ std::shared_ptr<Chain> StackChain::temporal(const std::string& op_str,
 
     run_engine_temporal(files_, ctx, false);
 
-    // Write result to a GDAL /vsimem/ file, return a Chain over it
-    // This lets the user chain further ops (.algebra(), .clip(), .save_local()...)
+    
+    
     std::string vsimem_path = "/vsimem/curaster_temporal_"
                              + std::to_string(reinterpret_cast<uintptr_t>(result.get()))
                              + ".tif";
@@ -173,7 +173,7 @@ std::shared_ptr<RasterResult> StackChain::to_memory(bool verbose) {
         "StackChain::to_memory(): call temporal() first to reduce the stack to a single raster.");
 }
 
-void StackChain::save_local(const std::string& /*path*/, bool /*verbose*/) {
+void StackChain::save_local(const std::string& , bool ) {
     throw std::runtime_error(
         "StackChain::save_local(): call temporal() first to reduce the stack to a single raster.");
 }

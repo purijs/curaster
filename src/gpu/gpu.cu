@@ -15,9 +15,9 @@
 #include "../../include/raster_core.h"
 #include <cuda_runtime.h>
 
-// ─── float4 component-wise helpers ───────────────────────────────────────────
-// These inline device functions mirror the scalar VM operations but operate
-// on four pixels simultaneously, enabling 4× throughput per thread.
+
+
+
 
 __device__ inline float4 f4_add(float4 a, float4 b) {
     return make_float4(a.x + b.x,
@@ -48,7 +48,7 @@ __device__ inline float4 f4_div(float4 a, float4 b) {
                        __fdividef(a.w, b.w + 1e-6f));
 }
 
-// ── Comparison operators — return 1.0 for true, 0.0 for false ────────────────
+
 __device__ inline float4 f4_gt(float4 a, float4 b) {
     return make_float4(a.x >  b.x ? 1.f : 0.f,
                        a.y >  b.y ? 1.f : 0.f,
@@ -91,9 +91,9 @@ __device__ inline float4 f4_neq(float4 a, float4 b) {
                        a.w != b.w ? 1.f : 0.f);
 }
 
-// ── Logical operators (fuzzy: AND = multiply, OR = max) ───────────────────────
+
 __device__ inline float4 f4_and(float4 a, float4 b) {
-    return f4_mul(a, b);  // Fuzzy AND: truth degree = product
+    return f4_mul(a, b);  
 }
 
 __device__ inline float4 f4_or(float4 a, float4 b) {
@@ -113,7 +113,7 @@ __device__ inline float4 f4_if(float4 condition, float4 true_val, float4 false_v
                   f4_mul(f4_not(condition), false_val));
 }
 
-// ── min / max ─────────────────────────────────────────────────────────────────
+
 __device__ inline float4 f4_min(float4 a, float4 b) {
     return make_float4(fminf(a.x, b.x),
                        fminf(a.y, b.y),
@@ -128,7 +128,7 @@ __device__ inline float4 f4_max(float4 a, float4 b) {
                        fmaxf(a.w, b.w));
 }
 
-// ─── kernel_raster_algebra ────────────────────────────────────────────────────
+
 /**
  * @brief Evaluate the algebra VM over all pixels.
  *
@@ -144,7 +144,7 @@ __global__ void kernel_raster_algebra(
     float* __restrict__             output,
     size_t                          num_pixels) {
 
-    // ── Vectorised (float4) main loop ─────────────────────────────────────
+    
     size_t base_pixel  = (static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x) * 4;
     size_t grid_stride = static_cast<size_t>(gridDim.x) * blockDim.x * 4;
 
@@ -256,15 +256,15 @@ __global__ void kernel_raster_algebra(
             }
         }
 
-        // Write 4 results at once.
+        
         *reinterpret_cast<float4*>(output + base_pixel) =
             (stack_top > 0) ? stack[0] : make_float4(0.f, 0.f, 0.f, 0.f);
 
         base_pixel += grid_stride;
     }
 
-    // ── Scalar tail loop ──────────────────────────────────────────────────
-    // Handles remaining pixels (num_pixels % 4 != 0 case).
+    
+    
     size_t tail_pixel = (num_pixels / 4) * 4
                       + static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
 
@@ -378,7 +378,7 @@ __global__ void kernel_raster_algebra(
     }
 }
 
-// ─── kernel_apply_mask ────────────────────────────────────────────────────────
+
 /**
  * @brief Zero out pixels that fall outside all polygon spans for their row.
  *
@@ -411,7 +411,7 @@ __global__ void kernel_apply_mask(
     output[pixel_idx] *= static_cast<float>(inside);
 }
 
-// ─── Kernel launch wrappers ───────────────────────────────────────────────────
+
 
 void launch_raster_algebra(
     const Instruction*  d_instructions,
@@ -423,7 +423,7 @@ void launch_raster_algebra(
 
     const int kThreadsPerBlock = 256;
 
-    // Each thread processes 4 pixels, so we need ceil(num_pixels/4) thread groups.
+    
     size_t pixel_groups = (num_pixels + 3) / 4;
     int    num_blocks   = static_cast<int>((pixel_groups + kThreadsPerBlock - 1) / kThreadsPerBlock);
 

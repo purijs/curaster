@@ -12,7 +12,7 @@
 #include <cstdint>
 #include <vector>
 
-// ─── Decompression routines ───────────────────────────────────────────────────
+
 
 /**
  * @brief Decompress a DEFLATE / LZW block.
@@ -43,7 +43,7 @@ bool zstd_decompress(const uint8_t* compressed_data, size_t compressed_length,
 void packbits_decompress(const uint8_t* compressed_data, size_t compressed_length,
                          std::vector<uint8_t>& out);
 
-// ─── Differencing-predictor reversal ─────────────────────────────────────────
+
 
 /**
  * @brief Reverse TIFF Predictor 2 (horizontal differencing) for UInt16 data.
@@ -71,7 +71,7 @@ void unpredict_horizontal_u16(uint8_t* data, int width, int height, int samples_
  */
 void unpredict_horizontal_f32(uint8_t* data, int width, int height, int samples_per_pixel);
 
-// ─── Type conversion ──────────────────────────────────────────────────────────
+
 
 /**
  * @brief Convert @p count UInt16 samples to float32 using AVX2 if available.
