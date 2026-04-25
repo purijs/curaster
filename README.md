@@ -81,13 +81,12 @@ Open a GeoTIFF and return a lazy `Chain`. No GPU work happens here.
 
 ```python
 chain = curaster.open("input.tif")
-chain = curaster.open("s3://my-bucket/data/scene.tif")   # S3 direct-read
-chain = curaster.open("/vsis3/my-bucket/data/scene.tif") # GDAL vsis3 URI
+chain = curaster.open("/vsis3/my-bucket/data/scene.tif") # S3 direct-read using GDAL vsis3 URI
 ```
 
 | Parameter | Type | Description |
 |---|---|---|
-| `path` | `str` | Local file path or S3 URI (`s3://` or `/vsis3/`) |
+| `path` | `str` | Local file path or GDAL-like S3 URI (`/vsis3/`) |
 
 **Returns** `Chain`
 
@@ -310,7 +309,7 @@ curaster.open("landsat8_sr.tif") \
 import curaster, os
 
 # Credentials are read from the environment automatically
-curaster.open("s3://my-bucket/scenes/LC08_2024_scene.tif") \
+curaster.open("/vsis3//my-bucket/scenes/LC08_2024_scene.tif") \
     .algebra("(B5 - B4) / (B5 + B4)") \
     .save_s3("/vsis3/my-bucket/output/ndvi.tif")
 ```
@@ -358,7 +357,7 @@ aoi = json.dumps({
     "coordinates": [[[10.0, 52.0], [11.0, 52.0], [11.0, 53.0], [10.0, 53.0], [10.0, 52.0]]]
 })
 
-curaster.open("s3://my-bucket/raw/sentinel2.tif") \
+curaster.open("/vsis3/my-bucket/raw/sentinel2.tif") \
     .algebra("(B8 - B4) / (B8 + B4)") \
     .clip(aoi) \
     .reproject("EPSG:4326", res_x=0.0001, res_y=0.0001) \
