@@ -12,6 +12,10 @@
 #include "../../include/types.h"
 #include "../../include/chunk_queue.h"
 
+// Full VramCache definition is in vram_cache.h; forward decl is enough here
+// because Chain only stores a shared_ptr<VramCache>.
+struct VramCache;
+
 class GDALRasterBand;
 
 
@@ -22,6 +26,26 @@ public:
 
 
     
+
+    /**
+     * @brief Pre-load the source raster into VRAM for zero-I/O repeated processing.
+     *
+     * Decodes all bands into CUDA device memory and creates bilinear + nearest
+     * texture objects for the warp engine.  All chains derived from the returned
+     * chain (via algebra/clip/reproject/…) share the same VRAM cache via
+     * shared_ptr, so each band is stored in VRAM only once.
+     *
+     * Operations and outputs are completely unchanged; only the I/O path is
+     * replaced: instead of reading from disk or S3 on every operation, the
+     * engines read directly from VRAM.
+     *
+     * @throws std::runtime_error if the decoded raster (data + texture arrays)
+     *         would exceed 80% of currently-free VRAM, or if raster dimensions
+     *         exceed the CUDA 2D texture limit on the active GPU.
+     */
+    std::shared_ptr<Chain> persist();
+
+    std::shared_ptr<Chain> select_bands(std::vector<int> bands);
 
     /**
      * @brief Append a band-math algebra operation.
@@ -73,9 +97,9 @@ public:
                                     float val_min              = 0.f,
                                     float val_max              = 0.f);
 
-    std::vector<ZoneResult> zonal_stats(const std::string& geojson_str,
-                                         const std::vector<std::string>& stats = {},
+    std::vector<ZoneResult> zonal_stats(const std::vector<std::string>& stats = {},
                                          int band = 1,
+                                         const std::string& geojson_str = "",
                                          bool verbose = false);
 
 
@@ -113,7 +137,11 @@ private:
     std::string            input_file_;
     std::vector<ChainOp>   operations_;
 
-    /// True if this chain contains a REPROJECT operation.
+    /// Non-null when persist() was called on an ancestor chain.
+    /// Shared across all derived chains; freed when the last chain is destroyed.
+    std::shared_ptr<VramCache> cache_;
+    std::vector<int> user_band_selection_;
+
     bool has_reproject_operation() const;
 
     /**

@@ -202,7 +202,16 @@ void run_engine_focal(const std::string& input_file, PipelineCtx& ctx, bool verb
             size_t per_thread_pinned =
                 2 * (size_t)width * (chunk_height + 2 * radius) * bytes_per_pixel_halo
               + (size_t)width * chunk_height * (num_src_bands + 1) * sizeof(float);
-            if (per_thread_pinned * num_threads > (size_t)(g_pinned_budget * 0.80)) break;
+
+            // For multi-band streaming each thread heap-allocates mb_host + compact
+            // per iteration; account for this so we don't OOM on 16GB machines.
+            size_t per_thread_heap = 0;
+            if (num_out_bands > 1 && ctx.queue_callback) {
+                per_thread_heap = 2 * (size_t)width * chunk_height * num_out_bands * sizeof(float);
+            }
+
+            if ((per_thread_pinned + per_thread_heap) * num_threads
+                    > (size_t)(g_pinned_budget * 0.80)) break;
 
             size_t per_thread_vram = 2 * halo_extra_bytes
                                    + (size_t)width * chunk_height * num_out_bands * sizeof(float);

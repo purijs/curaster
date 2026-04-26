@@ -20,6 +20,7 @@
 #include "../../include/cuda_utils.h"
 #include "../../include/raster_core.h"
 #include "../../include/thread_buffers.h"
+#include "../../include/vram_cache.h"
 
 #include "../reproject/reproject.h"
 #include "../s3/s3_auth.h"
@@ -267,9 +268,18 @@ void run_engine_reproject(const std::string &input_file, PipelineCtx &ctx,
 
   
 
+  const bool use_cache = (ctx.vram_cache != nullptr);
+
+  // When using the VRAM cache the per-thread canvas buffer is not needed;
+  // pass 1×1 canvas dimensions so alloc_warp avoids the large allocation.
+  // This creates a different WarpPoolKey from non-cache calls, so the two
+  // modes each get their own persistent pool without interference.
+  const int pool_canvas_w = use_cache ? 1 : max_canvas_width;
+  const int pool_canvas_h = use_cache ? 1 : max_canvas_height;
+
   auto &thread_pool = get_persistent_warp_pool(
       output_band_bytes, num_bands, warp_threads, ctx.has_clip_mask,
-      chunk_height, max_canvas_width, max_canvas_height, max_dst_pixels,
+      chunk_height, pool_canvas_w, pool_canvas_h, max_dst_pixels,
       ctx.reproject_params.resampling);
 
   
@@ -287,7 +297,8 @@ void run_engine_reproject(const std::string &input_file, PipelineCtx &ctx,
   }
 
   DatasetPool dataset_pool(warp_threads, num_bands);
-  if (!is_s3) {
+  // Skip GDALOpen when data is already decoded in VRAM.
+  if (!is_s3 && !use_cache) {
     for (int t = 0; t < warp_threads; ++t) {
       dataset_pool.datasets[t] =
           static_cast<GDALDataset *>(GDALOpen(input_file.c_str(), GA_ReadOnly));
@@ -342,35 +353,61 @@ void run_engine_reproject(const std::string &input_file, PipelineCtx &ctx,
     compute_coarse_grid(warp, chunk_y0, cur_height, out_info.width,
                         coarse_grid_x, coarse_grid_y);
 
-    
-
-    SrcBBox canvas_bbox = coarse_grid_to_source_bbox(
-        coarse_grid_x, coarse_grid_y, src_info.width, src_info.height);
-    canvas_bbox.w = std::min(canvas_bbox.w, max_canvas_width);
-    canvas_bbox.h = std::min(canvas_bbox.h, max_canvas_height);
-
     float coarse_x_f[WARP_GRID_WIDTH * WARP_GRID_HEIGHT];
     float coarse_y_f[WARP_GRID_WIDTH * WARP_GRID_HEIGHT];
-    for (int i = 0; i < WARP_GRID_WIDTH * WARP_GRID_HEIGHT; ++i) {
-      coarse_x_f[i] = static_cast<float>(coarse_grid_x[i] - canvas_bbox.x0);
-      coarse_y_f[i] = static_cast<float>(coarse_grid_y[i] - canvas_bbox.y0);
-    }
+    int kernel_canvas_w, kernel_canvas_h;
 
-    
-
-    memset(buf.h_src_canvas, 0,
-           static_cast<size_t>(canvas_bbox.w) * canvas_bbox.h * num_bands *
-               sizeof(float));
-
-    if (!is_s3) {
-      for (int b = 0; b < num_bands; ++b) {
-        dataset_pool.bands[thread_id][b]->RasterIO(
-            GF_Read, canvas_bbox.x0, canvas_bbox.y0, canvas_bbox.w,
-            canvas_bbox.h, buf.h_src_bands[b], canvas_bbox.w, canvas_bbox.h,
-            GDT_Float32, 0, 0);
+    if (use_cache) {
+      // ── VRAM cache fast-path ───────────────────────────────────────────────
+      // Absolute source coordinates — no canvas origin subtraction.
+      // Full-image textures in VramCache are sampled across [0, src_w) × [0, src_h).
+      for (int i = 0; i < WARP_GRID_WIDTH * WARP_GRID_HEIGHT; ++i) {
+        coarse_x_f[i] = static_cast<float>(coarse_grid_x[i]);
+        coarse_y_f[i] = static_cast<float>(coarse_grid_y[i]);
       }
+      kernel_canvas_w = src_info.width;
+      kernel_canvas_h = src_info.height;
 
-    } else if (src_info.is_tiled) {
+      // Route d_texture_objects to cache textures in band-slot order.
+      // Stack array (num_bands ≤ ~8 in practice); sync memcpy of ~64 bytes.
+      cudaTextureObject_t h_tex[64];
+      const bool bln = (ctx.reproject_params.resampling == ResampleMethod::BILINEAR);
+      for (int b = 0; b < num_bands; ++b) {
+        h_tex[b] = bln ? ctx.vram_cache->tex_bilinear[band_slots[b]]
+                       : ctx.vram_cache->tex_nearest [band_slots[b]];
+      }
+      CUDA_CHECK(cudaMemcpy(buf.d_texture_objects, h_tex,
+                            static_cast<size_t>(num_bands) *
+                                sizeof(cudaTextureObject_t),
+                            cudaMemcpyHostToDevice));
+
+    } else {
+      // ── Standard path: canvas bounding box + tile/strip loading ───────────
+      SrcBBox canvas_bbox = coarse_grid_to_source_bbox(
+          coarse_grid_x, coarse_grid_y, src_info.width, src_info.height);
+      canvas_bbox.w = std::min(canvas_bbox.w, max_canvas_width);
+      canvas_bbox.h = std::min(canvas_bbox.h, max_canvas_height);
+
+      for (int i = 0; i < WARP_GRID_WIDTH * WARP_GRID_HEIGHT; ++i) {
+        coarse_x_f[i] = static_cast<float>(coarse_grid_x[i] - canvas_bbox.x0);
+        coarse_y_f[i] = static_cast<float>(coarse_grid_y[i] - canvas_bbox.y0);
+      }
+      kernel_canvas_w = canvas_bbox.w;
+      kernel_canvas_h = canvas_bbox.h;
+
+      memset(buf.h_src_canvas, 0,
+             static_cast<size_t>(canvas_bbox.w) * canvas_bbox.h * num_bands *
+                 sizeof(float));
+
+      if (!is_s3) {
+        for (int b = 0; b < num_bands; ++b) {
+          dataset_pool.bands[thread_id][b]->RasterIO(
+              GF_Read, canvas_bbox.x0, canvas_bbox.y0, canvas_bbox.w,
+              canvas_bbox.h, buf.h_src_bands[b], canvas_bbox.w, canvas_bbox.h,
+              GDT_Float32, 0, 0);
+        }
+
+      } else if (src_info.is_tiled) {
       std::vector<TileFetch> fetch_jobs;
       int tr0 = canvas_bbox.y0 / src_info.tile_height;
       int tr1 = (canvas_bbox.y0 + canvas_bbox.h - 1) / src_info.tile_height;
@@ -491,66 +528,116 @@ void run_engine_reproject(const std::string &input_file, PipelineCtx &ctx,
                                is_pixel_interleaved, band_slots,
                                buf.h_src_bands, canvas_bbox, -1);
       }
-    }
-
-    
+      }  // end !is_s3 / is_tiled / strip chains
+    }    // end if (!use_cache)
 
     CUDA_CHECK(cudaMemcpyAsync(buf.d_coarse_x, coarse_x_f, coarse_grid_bytes,
                                cudaMemcpyHostToDevice, buf.cuda_stream));
     CUDA_CHECK(cudaMemcpyAsync(buf.d_coarse_y, coarse_y_f, coarse_grid_bytes,
                                cudaMemcpyHostToDevice, buf.cuda_stream));
-    buf.bind_src_canvas(num_bands, canvas_bbox.w, canvas_bbox.h,
-                        buf.cuda_stream);
 
-    
+    // bind_src_canvas uploads h_src_canvas → CUDA array; skip when the cache
+    // already has the full-image arrays bound via d_texture_objects.
+    if (!use_cache) {
+      buf.bind_src_canvas(num_bands, kernel_canvas_w, kernel_canvas_h,
+                          buf.cuda_stream);
+    }
 
     launch_warp_kernel(
         buf.d_coarse_x, buf.d_coarse_y,
         reinterpret_cast<const cudaTextureObject_t *>(buf.d_texture_objects),
-        buf.d_warp_output, canvas_bbox.w, canvas_bbox.h, out_info.width,
+        buf.d_warp_output, kernel_canvas_w, kernel_canvas_h, out_info.width,
         cur_height, num_bands,
         static_cast<float>(ctx.reproject_params.nodata_value),
         static_cast<size_t>(out_info.width) * chunk_height, buf.cuda_stream);
 
-    
-
     size_t dst_pixels = static_cast<size_t>(out_info.width) * cur_height;
-    launch_raster_algebra(
-        d_instructions, static_cast<int>(ctx.instructions.size()),
-        const_cast<const float *const *>(buf.d_warp_band_ptrs), buf.d_output,
-        dst_pixels, buf.cuda_stream);
+    const bool is_passthrough = ctx.instructions.empty();
 
-    
-
-    if (ctx.has_clip_mask && buf.d_clip_spans) {
-      memset(buf.h_clip_spans, 0, cur_height * sizeof(GpuSpanRow));
-      for (int row = chunk_y0; row < chunk_y0 + cur_height; ++row) {
-        auto it = ctx.clip_spans.find(row);
-        if (it != ctx.clip_spans.end() && !it->second.empty()) {
-          buf.h_clip_spans[row - chunk_y0] = it->second[0];
+    if (is_passthrough) {
+      if (ctx.has_clip_mask && buf.d_clip_spans) {
+        memset(buf.h_clip_spans, 0, cur_height * sizeof(GpuSpanRow));
+        for (int row = chunk_y0; row < chunk_y0 + cur_height; ++row) {
+          auto it = ctx.clip_spans.find(row);
+          if (it != ctx.clip_spans.end() && !it->second.empty()) {
+            buf.h_clip_spans[row - chunk_y0] = it->second[0];
+          }
+        }
+        for (int b = 0; b < num_bands; ++b) {
+          launch_apply_mask(
+              buf.d_warp_output + static_cast<size_t>(b) * max_dst_pixels,
+              dst_pixels, out_info.width, buf.d_clip_spans, buf.cuda_stream);
         }
       }
-      launch_apply_mask(buf.d_output, dst_pixels, out_info.width,
-                        buf.d_clip_spans, buf.cuda_stream);
-    }
 
-    
+      CUDA_CHECK(cudaMemcpy2DAsync(
+          buf.h_warp_multiband,
+          dst_pixels * sizeof(float),
+          buf.d_warp_output,
+          max_dst_pixels * sizeof(float),
+          dst_pixels * sizeof(float),
+          static_cast<size_t>(num_bands),
+          cudaMemcpyDeviceToHost, buf.cuda_stream));
+      CUDA_CHECK(cudaStreamSynchronize(buf.cuda_stream));
 
-    CUDA_CHECK(cudaStreamSynchronize(buf.cuda_stream));
-
-    if (ctx.output_band) {
+      if (ctx.output_dataset) {
+        auto* ds = static_cast<GDALDataset*>(ctx.output_dataset);
 #pragma omp critical(gdal_write)
-      {
-        ctx.output_band->RasterIO(GF_Write, 0, chunk_y0, out_info.width,
-                                  cur_height, buf.h_output, out_info.width,
-                                  cur_height, GDT_Float32, 0, 0);
+        {
+          for (int b = 0; b < num_bands; ++b) {
+            ds->GetRasterBand(b + 1)->RasterIO(GF_Write, 0, chunk_y0,
+                out_info.width, cur_height,
+                buf.h_warp_multiband + static_cast<size_t>(b) * dst_pixels,
+                out_info.width, cur_height, GDT_Float32, 0, 0);
+          }
+        }
+      } else if (ctx.output_band) {
+#pragma omp critical(gdal_write)
+        {
+          ctx.output_band->RasterIO(GF_Write, 0, chunk_y0, out_info.width,
+              cur_height, buf.h_warp_multiband, out_info.width,
+              cur_height, GDT_Float32, 0, 0);
+        }
       }
-    }
-    if (ctx.queue_callback) {
-      ctx.queue_callback(out_info.width, cur_height, buf.h_output, chunk_y0);
-    }
-    if (ctx.result_callback) {
-      ctx.result_callback(out_info.width, cur_height, buf.h_output, chunk_y0);
+      if (ctx.result_callback)
+        ctx.result_callback(out_info.width, cur_height, buf.h_warp_multiband, chunk_y0);
+      if (ctx.queue_callback)
+        ctx.queue_callback(out_info.width, cur_height, buf.h_warp_multiband, chunk_y0);
+
+    } else {
+      launch_raster_algebra(
+          d_instructions, static_cast<int>(ctx.instructions.size()),
+          const_cast<const float *const *>(buf.d_warp_band_ptrs), buf.d_output,
+          dst_pixels, buf.cuda_stream);
+
+      if (ctx.has_clip_mask && buf.d_clip_spans) {
+        memset(buf.h_clip_spans, 0, cur_height * sizeof(GpuSpanRow));
+        for (int row = chunk_y0; row < chunk_y0 + cur_height; ++row) {
+          auto it = ctx.clip_spans.find(row);
+          if (it != ctx.clip_spans.end() && !it->second.empty()) {
+            buf.h_clip_spans[row - chunk_y0] = it->second[0];
+          }
+        }
+        launch_apply_mask(buf.d_output, dst_pixels, out_info.width,
+                          buf.d_clip_spans, buf.cuda_stream);
+      }
+
+      CUDA_CHECK(cudaStreamSynchronize(buf.cuda_stream));
+
+      if (ctx.output_band) {
+#pragma omp critical(gdal_write)
+        {
+          ctx.output_band->RasterIO(GF_Write, 0, chunk_y0, out_info.width,
+                                    cur_height, buf.h_output, out_info.width,
+                                    cur_height, GDT_Float32, 0, 0);
+        }
+      }
+      if (ctx.queue_callback) {
+        ctx.queue_callback(out_info.width, cur_height, buf.h_output, chunk_y0);
+      }
+      if (ctx.result_callback) {
+        ctx.result_callback(out_info.width, cur_height, buf.h_output, chunk_y0);
+      }
     }
 
     if (verbose) {

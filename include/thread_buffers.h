@@ -30,6 +30,7 @@ struct ThreadBufs {
     float* d_coarse_y   = nullptr;
     float* d_warp_output = nullptr;
     float** d_warp_band_ptrs = nullptr;
+    float* h_warp_multiband = nullptr;
     size_t warp_max_chunk_pixels = 0;
 
     float*  h_halo_master         = nullptr;
@@ -216,6 +217,8 @@ struct ThreadBufs {
 
         warp_max_chunk_pixels = max_dst_pixels;
         CUDA_CHECK(cudaMalloc(&d_warp_output, max_dst_pixels * num_bands * sizeof(float)));
+        CUDA_CHECK(cudaHostAlloc(&h_warp_multiband,
+            max_dst_pixels * num_bands * sizeof(float), cudaHostAllocDefault));
 
         std::vector<float*> warp_band_ptrs(num_bands);
         for (int band = 0; band < num_bands; ++band) {
@@ -340,6 +343,7 @@ struct ThreadBufs {
         cudaFree(d_coarse_y);       d_coarse_y        = nullptr;
         cudaFree(d_warp_output);    d_warp_output     = nullptr;
         cudaFree(d_warp_band_ptrs); d_warp_band_ptrs  = nullptr;
+        if (h_warp_multiband) { cudaFreeHost(h_warp_multiband); h_warp_multiband = nullptr; }
     }
 
     void free_all() {

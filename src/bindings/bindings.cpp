@@ -33,9 +33,12 @@ PYBIND11_MODULE(curaster, module) {
     GDALAllRegister();
     init_ram_budget();
 
-    module.def("open", [](const std::string& file_path) {
-        return std::make_shared<Chain>(file_path);
-    }, py::arg("path"), "Open a GeoTIFF and return a lazy Chain.");
+    module.def("open", [](const std::string& file_path, std::vector<int> bands) {
+        auto chain = std::make_shared<Chain>(file_path);
+        if (!bands.empty()) return chain->select_bands(bands);
+        return chain;
+    }, py::arg("path"), py::arg("bands") = std::vector<int>{},
+       "Open a GeoTIFF and return a lazy Chain. bands: optional 1-indexed band list.");
 
     module.def("open_stack", [](const std::vector<std::string>& files) {
         return make_stack(files);
@@ -43,6 +46,13 @@ PYBIND11_MODULE(curaster, module) {
 
     
     py::class_<Chain, std::shared_ptr<Chain>>(module, "Chain")
+        .def("persist", &Chain::persist,
+             "Pre-load the source raster into VRAM for zero-I/O repeated processing.\n"
+             "Returns a new Chain that shares the cached VRAM data with all chains\n"
+             "derived from it (algebra/clip/reproject/…).\n"
+             "Raises RuntimeError if the raster exceeds 80%% of free VRAM or if\n"
+             "raster dimensions exceed the CUDA 2D texture limit.")
+        .def("select_bands", &Chain::select_bands, py::arg("bands"))
         .def("algebra",   &Chain::algebra,  py::arg("expression"))
         .def("clip",      &Chain::clip,     py::arg("geojson"))
         .def("get_info",  [](const Chain& chain) {
@@ -89,11 +99,15 @@ PYBIND11_MODULE(curaster, module) {
              py::arg("val_max")         = 0.f,
              "GLCM texture features. Returns 18-band raster with Haralick features.")
         .def("zonal_stats", &Chain::zonal_stats,
-             py::arg("geojson"),
-             py::arg("stats")   = std::vector<std::string>{},
-             py::arg("band")    = 1,
-             py::arg("verbose") = false,
-             "Compute zonal statistics. Returns list of dicts with zone stats.")
+             py::arg("stats")      = std::vector<std::string>{},
+             py::arg("band")       = 1,
+             py::arg("geojson_str") = "",
+             py::arg("verbose")    = false,
+             "Compute zonal statistics over the pipeline output.\n"
+             "stats: list of 'mean','min','max','std','count','sum' (default: all).\n"
+             "band: 1-based band index to use (validated; raises on out-of-range).\n"
+             "geojson_str: GeoJSON FeatureCollection with zone polygons; omit for whole-image stats.\n"
+             "Preceding algebra/clip/terrain ops are applied before computing stats.")
         .def("save_local", &Chain::save_local,
              py::arg("path"), py::arg("verbose") = false)
         .def("save_s3",    &Chain::save_s3,

@@ -9,14 +9,17 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
-#include "raster_core.h"  
-#include "types.h"        
+#include "raster_core.h"
+#include "types.h"
 
+// Forward declaration – full definition in vram_cache.h (included by chain.cpp/engine*.cpp).
+struct VramCache;
 
 class GDALRasterBand;
 
@@ -203,5 +206,11 @@ struct PipelineCtx {
     TemporalParams temporal_params;
     int            temporal_num_scenes = 0;
     std::vector<std::string> temporal_scene_files;
+
+    // ── VRAM cache (set by Chain::persist() before calling the engine) ──────
+    // Non-null when the input raster was pre-loaded into device memory.
+    // Only attached to contexts that read from the original persisted file
+    // (pre-pass and simple algebra/reproject paths); vsimem passes leave it null.
+    std::shared_ptr<VramCache> vram_cache;
 };
 

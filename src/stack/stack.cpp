@@ -164,7 +164,7 @@ std::shared_ptr<Chain> StackChain::temporal(const std::string& op_str,
                  result->data.data(), ref.width, ref.height, GDT_Float32, 0, 0);
     GDALClose(vd);
 
-    return std::make_shared<Chain>(vsimem_path)->algebra("B1");
+    return std::make_shared<Chain>(vsimem_path);
 }
 
 std::shared_ptr<RasterResult> StackChain::to_memory(bool verbose) {

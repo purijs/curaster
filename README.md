@@ -14,6 +14,8 @@
 - [Quick Start](#quick-start)
 - [API Reference](#api-reference)
   - [curaster.open()](#curasteropen)
+  - [Chain.select_bands()](#chainselect_bands)
+  - [Chain.persist()](#chainpersist)
   - [Chain.algebra()](#chainalgebra)
   - [Chain.clip()](#chainclip)
   - [Chain.reproject()](#chainreproject)
@@ -22,11 +24,13 @@
   - [Chain.save_s3()](#chainsave_s3)
   - [Chain.to_memory()](#chainto_memory)
   - [Chain.iter_begin()](#chainiter_begin)
-  - [Chain.focal()](#chainfocalstat-radius3-shapesquare-clamp_bordertrue)
-  - [Chain.terrain()](#chainterrainmetricsslope-unitdegrees-sun_azimuth3150-sun_altitude450-methodhorn)
+  - [Chain.focal()](#chainfocalstatmean-radius1-shapesquare-clamp_bordertrue)
+  - [Chain.terrain()](#chainterrainmetrics-unitdegrees-sun_azimuth3150-sun_altitude450-methodhorn)
   - [Chain.texture()](#chaintexturefeatures-window11-levels32-direction_modeaverage-log_scalefalse-val_min00-val_max00)
   - [Chain.zonal_stats()](#chainzonal_statsgeojson-statsmean-std-min-max-count-sum-band1-verbosefalse)
   - [curaster.open_stack() / StackChain](#curasteropen_stackfiles--stackchain)
+    - [StackChain.algebra()](#stackchainalgebra)
+    - [StackChain.reproject()](#stackchainreproject)
   - [RasterResult](#rasterresult)
   - [ChunkQueue](#chunkqueue)
 - [Examples](#examples)
@@ -75,26 +79,65 @@ curaster.open("landsat.tif") \
 
 ## API Reference
 
-### `curaster.open(path)`
+### `curaster.open(path, bands=[])`
 
 Open a GeoTIFF and return a lazy `Chain`. No GPU work happens here.
 
 ```python
 chain = curaster.open("input.tif")
-chain = curaster.open("/vsis3/my-bucket/data/scene.tif") # S3 direct-read using GDAL vsis3 URI
+chain = curaster.open("/vsis3/my-bucket/data/scene.tif")  # S3 direct-read
+chain = curaster.open("sentinel2.tif", bands=[2, 3, 4])   # select bands 2, 3, 4 (1-indexed)
 ```
 
-| Parameter | Type | Description |
-|---|---|---|
-| `path` | `str` | Local file path or GDAL-like S3 URI (`/vsis3/`) |
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `path` | `str` | required | Local file path or GDAL-like S3 URI (`/vsis3/`) |
+| `bands` | `list[int]` | `[]` | 1-indexed band selection (empty = all bands) |
 
 **Returns** `Chain`
 
 ---
 
+### `Chain.select_bands(bands)`
+
+Return a new Chain that processes only the specified source bands (1-indexed). Equivalent to passing `bands=` to `curaster.open()` but can also be called on derived chains.
+
+```python
+curaster.open("4band.tif").select_bands([1, 3]).clip(aoi).to_memory()
+```
+
+| Parameter | Type | Description |
+|---|---|---|
+| `bands` | `list[int]` | 1-indexed band numbers to keep |
+
+**Returns** a new `Chain`
+
+---
+
+### `Chain.persist()`
+
+Pre-load the source raster into GPU VRAM so that all subsequent operations on this chain skip disk or S3 I/O entirely. Useful when you run the same source raster through multiple independent pipelines (e.g. different algebra expressions or clip regions) and want to avoid re-reading it each time.
+
+```python
+# Load once into VRAM, then run multiple pipelines without re-reading
+scene = curaster.open("/vsis3/bucket/sentinel2.tif").persist()
+
+scene.algebra("(B8 - B4) / (B8 + B4)").save_local("ndvi.tif")
+scene.algebra("(B3 - B8) / (B3 + B8)").save_local("ndwi.tif")
+scene.algebra("(B11 - B8) / (B11 + B8)").clip(aoi).save_local("nbr.tif")
+```
+
+All chains derived from a persisted chain share the same VRAM data. Raises `RuntimeError` if the decoded raster exceeds 80% of available VRAM, or if raster dimensions exceed the CUDA 2D texture limit on the active GPU.
+
+**Returns** a new `Chain`
+
+---
+
 ### `Chain.algebra(expression)`
 
-Append a band-math operation. Bands are referenced as `B1`, `B2`, … (1-indexed).
+Append a band-math expression. Bands are referenced as `B1`, `B2`, … (1-indexed).
+
+**`algebra` always produces a single-band output.** All bands referenced in the expression are combined into one scalar value per pixel. Any operation chained after `algebra` (clip, reproject, focal, etc.) receives a 1-band raster.
 
 ```python
 chain.algebra("(B5 - B4) / (B5 + B4)")      # NDVI
@@ -116,7 +159,14 @@ Supported operators: `+  -  *  /  >  <  >=  <=  ==  !=`
 
 ### `Chain.clip(geojson)`
 
-Clip the output to a polygon. Pixels outside the polygon are set to zero.
+Clip the output to a polygon. Pixels outside the polygon are set to zero. The masking is applied on the GPU.
+
+The geometry must be in the **CRS that is active at the point in the chain where `clip` appears**:
+
+- `.clip(aoi).reproject(...)` — `aoi` must be in the **source CRS** (clip executes before reprojection)
+- `.reproject(...).clip(aoi)` — `aoi` must be in the **target CRS** (clip executes after reprojection)
+
+The two orderings are strictly different operations. Multiple `clip` calls accumulate — each geometry is intersected with the previous mask.
 
 ```python
 import json
@@ -131,7 +181,7 @@ chain.algebra("(B5 - B4) / (B5 + B4)").clip(aoi)
 
 | Parameter | Type | Description |
 |---|---|---|
-| `geojson` | `str` | GeoJSON string — `Polygon` or `MultiPolygon` |
+| `geojson` | `str` | GeoJSON string — `Polygon` or `MultiPolygon` in the raster's current CRS |
 
 **Returns** a new `Chain`
 
@@ -222,7 +272,7 @@ curaster.open("scene.tif") \
 
 ### `Chain.to_memory(verbose=False)`
 
-Execute and return all pixels as a `RasterResult` object. Raises `RuntimeError` if the result would exceed 75 % of available RAM — use `iter_begin()` for large rasters.
+Execute and return all pixels as a `RasterResult` object. Raises `RuntimeError` if the result would exceed a dynamically-computed RAM budget (8–70 % of available RAM depending on the operation type — focal/terrain/texture reserve more headroom for their GPU buffers). Use `iter_begin()` for large rasters or when memory is tight.
 
 ```python
 result = curaster.open("scene.tif") \
@@ -230,9 +280,9 @@ result = curaster.open("scene.tif") \
     .to_memory()
 
 import numpy as np
-arr = result.data()          # numpy array, shape (height, width), dtype float32
-print(arr.mean(), arr.std())
-print(result.width, result.height, result.proj)
+arr = result.data()          # shape (height, width) for 1-band, (bands, height, width) for multi-band
+print(arr.shape, arr.dtype)  # float32
+print(result.width, result.height, result.bands, result.proj)
 ```
 
 **Returns** `RasterResult`
@@ -252,9 +302,18 @@ while True:
     chunk = queue.next()
     if chunk is None:
         break
-    # chunk = {'y_offset': int, 'width': int, 'height': int, 'data': np.ndarray}
+    # chunk["data"] shape: (height, width) for 1-band  |  (bands, height, width) for multi-band
     process(chunk["data"], chunk["y_offset"])
 ```
+
+All output operations (`to_memory`, `save_local`, `save_s3`, `iter_begin`) respect the output band count of the pipeline:
+- No compute op: passthrough — all source bands (or those selected via `select_bands` / `bands=`) streamed as-is
+- `algebra`: always 1 band
+- `focal`: one band per input band (independent per-band window)
+- `terrain`: one band per requested metric
+- `texture`: 18 bands (average mode) or 72 bands (separate mode)
+
+Clip and reproject are applied per-band and do not change the band count.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -272,8 +331,9 @@ Returned by `to_memory()`.
 |---|---|---|
 | `.width` | `int` | Output width in pixels |
 | `.height` | `int` | Output height in pixels |
+| `.bands` | `int` | Number of output bands |
 | `.proj` | `str` | WKT coordinate reference system |
-| `.data()` | `np.ndarray` | `float32` array of shape `(height, width)` |
+| `.data()` | `np.ndarray` | `float32` array — shape `(height, width)` for 1 band, `(bands, height, width)` for multi-band |
 
 ---
 
@@ -285,7 +345,7 @@ Returned by `iter_begin()`. Processing runs on a background thread.
 |---|---|---|
 | `.next()` | `dict` or `None` | Pop the next chunk, or `None` on completion |
 
-Each chunk dict has keys: `y_offset` (`int`), `width` (`int`), `height` (`int`), `data` (`np.ndarray float32`).
+Each chunk dict has keys: `y_offset` (`int`), `width` (`int`), `height` (`int`), `data` (`np.ndarray float32` — shape `(height, width)` or `(bands, height, width)`).
 
 ---
 
@@ -347,6 +407,41 @@ curaster.open("utm_scene.tif") \
 
 ---
 
+### Multiband passthrough — clip and reproject without algebra
+
+Chains without `algebra`, `terrain`, or `texture` pass all source bands through untouched.
+
+```python
+import curaster, json
+
+aoi = json.dumps({
+    "type": "Polygon",
+    "coordinates": [[[13.3, 52.4], [13.5, 52.4], [13.5, 52.6], [13.3, 52.6], [13.3, 52.4]]]
+})
+
+# Clip a 4-band raster: returns (4, H, W)
+result = curaster.open("sentinel2_4band.tif").clip(aoi).to_memory()
+print(result.data().shape)   # (4, H, W)
+
+# Reproject all bands to WGS84
+curaster.open("utm_scene.tif") \
+    .reproject("EPSG:4326", res_x=0.0001, res_y=0.0001) \
+    .save_local("reprojected_all_bands.tif")
+
+# Select specific bands (1-indexed)
+curaster.open("sentinel2.tif", bands=[2, 3, 4]) \
+    .clip(aoi) \
+    .save_local("rgb_clipped.tif")
+
+# Equivalent using select_bands
+curaster.open("sentinel2.tif") \
+    .select_bands([2, 3, 4]) \
+    .reproject("EPSG:4326") \
+    .iter_begin()
+```
+
+---
+
 ### Full pipeline: S3 → algebra → clip → reproject → S3
 
 ```python
@@ -392,7 +487,7 @@ result = curaster.open("scene.tif") \
     .algebra("(B5 - B4) / (B5 + B4)") \
     .to_memory()
 
-arr = result.data()   # shape (H, W), dtype float32
+arr = result.data()   # shape (H, W) for 1-band; (bands, H, W) for multi-band; dtype float32
 arr[arr == -9999.0] = np.nan
 
 gt = curaster.open("scene.tif").get_info()["geotransform"]
@@ -448,13 +543,169 @@ curaster.open("scene.tif") \
 
 ---
 
----
-
-### `Chain.focal(stat, radius=3, shape="square", clamp_border=True)`
-
-Apply a moving-window focal statistic.
+### Focal — multi-band independent smoothing
 
 ```python
+import curaster
+
+# 4-band input → 4-band smoothed output (one focal pass per band)
+curaster.open("multispectral.tif") \
+    .focal("mean", radius=3) \
+    .save_local("smoothed_4band.tif")
+
+# Focal → clip (clip is applied in the source CRS; all bands preserved)
+curaster.open("multispectral.tif") \
+    .focal("mean", radius=3) \
+    .clip('{"type":"Polygon","coordinates":[[[10.2,50.2],[10.6,50.2],[10.6,50.6],[10.2,50.6],[10.2,50.2]]]}') \
+    .save_local("smoothed_clipped.tif")
+
+# Focal → reproject (reproject is applied after all band focal passes)
+curaster.open("multispectral.tif") \
+    .focal("mean", radius=3) \
+    .reproject("EPSG:32632", res_x=1000, res_y=1000) \
+    .save_local("smoothed_utm.tif")
+
+# Focal → clip (source CRS) → reproject to UTM
+curaster.open("multispectral.tif") \
+    .focal("median", radius=2, shape="circle") \
+    .clip('{"type":"Polygon","coordinates":[[[10.2,50.2],[10.6,50.2],[10.6,50.6],[10.2,50.6],[10.2,50.2]]]}') \
+    .reproject("EPSG:32632") \
+    .save_local("smoothed_clipped_utm.tif")
+
+# Stream multi-band focal result chunk by chunk
+chain = curaster.open("multispectral.tif").focal("mean", radius=5)
+queue = chain.iter_begin(buf_chunks=4)
+while True:
+    chunk = queue.next()
+    if chunk is None:
+        break
+    # chunk["data"] shape: (bands, height, width)
+    print(f"offset={chunk['y_offset']} bands={chunk['data'].shape[0]}")
+```
+
+---
+
+### Clip ordering — source CRS vs target CRS
+
+Clip geometry must be in the **same CRS as the data at that point in the chain**.
+
+```python
+import curaster
+
+src_aoi = '{"type":"Polygon","coordinates":[[[10.2,50.2],[10.6,50.2],[10.6,50.6],[10.2,50.6],[10.2,50.2]]]}'
+utm_aoi = '{"type":"Polygon","coordinates":[[[596000,5564000],[628000,5564000],[628000,5614000],[596000,5614000],[596000,5564000]]]}'
+
+# .clip().reproject() — geometry in SOURCE CRS (EPSG:4326)
+# Clips first, then reprojects the clipped raster to UTM
+curaster.open("scene.tif") \
+    .clip(src_aoi) \
+    .reproject("EPSG:32632") \
+    .save_local("clip_then_reproject.tif")
+
+# .reproject().clip() — geometry in TARGET CRS (EPSG:32632 UTM)
+# Reprojects the full raster first, then clips the UTM output
+curaster.open("scene.tif") \
+    .reproject("EPSG:32632") \
+    .clip(utm_aoi) \
+    .save_local("reproject_then_clip.tif")
+```
+
+---
+
+### Zonal statistics
+
+```python
+import json
+import curaster
+
+zones_fc = json.dumps({
+    "type": "FeatureCollection",
+    "features": [
+        {"type": "Feature", "id": "zone_a",
+         "geometry": {"type": "Polygon", "coordinates": [[[10.2,50.2],[10.5,50.2],[10.5,50.5],[10.2,50.5],[10.2,50.2]]]}},
+        {"type": "Feature", "id": "zone_b",
+         "geometry": {"type": "Polygon", "coordinates": [[[10.5,50.5],[10.8,50.5],[10.8,50.8],[10.5,50.8],[10.5,50.5]]]}}
+    ]
+})
+
+# Whole-image stats (single band)
+results = curaster.open("dem.tif").zonal_stats()
+for r in results:
+    print(r.to_dict())
+# → [{"zone_id": "all", "mean": ..., "min": ..., "max": ..., "std_dev": ..., "count": ..., "sum": ...}]
+
+# Per-zone stats on band 1
+results = curaster.open("multispectral.tif").zonal_stats(
+    stats=["mean", "std", "count"],
+    band=1,
+    geojson_str=zones_fc
+)
+for r in results:
+    d = r.to_dict()
+    print(f"zone={d['zone_id']}  mean={d['mean']:.4f}  std={d['std_dev']:.4f}  n={d['count']}")
+
+# Zonal stats on algebra output (NDVI), band=1 (the only output band)
+results = curaster.open("multispectral.tif") \
+    .algebra("(B5 - B4) / (B5 + B4)") \
+    .zonal_stats(stats=["mean", "min", "max"], band=1, geojson_str=zones_fc)
+
+# Serialise to list of dicts (e.g. for pandas / JSON export)
+rows = [r.to_dict() for r in results]
+import pandas as pd
+df = pd.DataFrame(rows)
+```
+
+| `ZoneResult` attribute | Type | Description |
+|---|---|---|
+| `zone_id` | `str` | Feature `id` from GeoJSON, or `"all"` for whole-image |
+| `mean` | `float` | Band mean over valid (non-nodata) pixels |
+| `min` | `float` | Minimum pixel value |
+| `max` | `float` | Maximum pixel value |
+| `std_dev` | `float` | Standard deviation |
+| `count` | `int` | Number of valid pixels |
+| `sum` | `float` | Sum of valid pixels |
+| `to_dict()` | `dict` | All of the above as a Python dict |
+
+---
+
+### `StackChain` — multi-scene algebra and reprojection
+
+```python
+import curaster
+
+# Stack three Sentinel-2 scenes (co-registered, same grid)
+stack = curaster.open_stack([
+    "S2_20240601.tif",
+    "S2_20240615.tif",
+    "S2_20240701.tif",
+])
+
+# Per-pixel temporal mean across scenes, then reproject to UTM
+stack.temporal("mean") \
+     .reproject("EPSG:32632", res_x=10, res_y=10) \
+     .save_local("seasonal_mean_utm.tif")
+
+# Algebra on the stack (B1 = first scene band 1, etc. — use scene index prefix)
+# then save locally
+stack.algebra("(B5 - B4) / (B5 + B4)") \
+     .save_local("ndvi_stack.tif")
+
+# Reproject all scenes in the stack before temporal reduction
+reproj_stack = stack.reproject("EPSG:32632", res_x=10, res_y=10)
+result = reproj_stack.temporal("std")
+result.save_local("temporal_std_utm.tif")
+```
+
+---
+
+---
+
+### `Chain.focal(stat="mean", radius=1, shape="square", clamp_border=True)`
+
+Apply a moving-window focal statistic. On a **multi-band input, focal runs independently on each band** and returns the same number of bands as the input. You can follow `focal` with `clip`, `reproject`, `save_local`, etc. and all bands are preserved.
+
+```python
+# Single-band DEM smoothing
 curaster.open("dem.tif") \
     .focal("mean", radius=5) \
     .save_local("dem_smoothed.tif")
@@ -462,12 +713,31 @@ curaster.open("dem.tif") \
 curaster.open("dem.tif") \
     .focal("median", radius=3, shape="circle") \
     .save_local("dem_median.tif")
+
+# Multi-band: 4-band input → 4-band focal output
+curaster.open("sentinel2_4band.tif") \
+    .focal("mean", radius=3) \
+    .save_local("smoothed_4band.tif")
+
+# Focal + clip (post-focal clip preserves all bands)
+import json
+aoi = json.dumps({"type": "Polygon", "coordinates": [[[10.0, 52.0], [11.0, 52.0], [11.0, 53.0], [10.0, 53.0], [10.0, 52.0]]]})
+curaster.open("sentinel2_4band.tif") \
+    .focal("mean") \
+    .clip(aoi) \
+    .save_local("smoothed_clipped_4band.tif")
+
+# Focal + reproject (post-focal reproject preserves all bands)
+curaster.open("sentinel2_4band.tif") \
+    .focal("mean", radius=3) \
+    .reproject("EPSG:4326") \
+    .save_local("smoothed_reprojected_4band.tif")
 ```
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `stat` | `str` | required | `mean`, `sum`, `min`, `max`, `std`, `variance`, `median`, `range` |
-| `radius` | `int` | `3` | Half-window radius in pixels (window = 2R+1 × 2R+1) |
+| `stat` | `str` | `"mean"` | `mean`, `sum`, `min`, `max`, `std`, `variance`, `median`, `range` |
+| `radius` | `int` | `1` | Half-window radius in pixels (window = 2R+1 × 2R+1) |
 | `shape` | `str` | `"square"` | `"square"` or `"circle"` |
 | `clamp_border` | `bool` | `True` | Clamp border pixels (replicate edge rows/cols) |
 
@@ -475,7 +745,7 @@ curaster.open("dem.tif") \
 
 ---
 
-### `Chain.terrain(metrics=["slope"], unit="degrees", sun_azimuth=315.0, sun_altitude=45.0, method="horn")`
+### `Chain.terrain(metrics=[], unit="degrees", sun_azimuth=315.0, sun_altitude=45.0, method="horn")`
 
 Compute terrain derivatives from a DEM.
 
@@ -494,7 +764,7 @@ curaster.open("dem.tif") \
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `metrics` | `list[str]` | `["slope"]` | Any subset of: `slope`, `aspect`, `hillshade`, `tri`, `tpi`, `roughness`, `prof_curv`, `plan_curv`, `total_curv` |
+| `metrics` | `list[str]` | `[]` = all | Any subset of: `slope`, `aspect`, `hillshade`, `tri`, `tpi`, `roughness`, `prof_curv`, `plan_curv`, `total_curv` (empty = all metrics) |
 | `unit` | `str` | `"degrees"` | Slope output unit — `"degrees"`, `"radians"`, or `"percent"` |
 | `sun_azimuth` | `float` | `315.0` | Sun azimuth for hillshade (degrees from north) |
 | `sun_altitude` | `float` | `45.0` | Sun altitude for hillshade (degrees above horizon) |
@@ -535,31 +805,64 @@ curaster.open("image.tif") \
 
 ---
 
-### `Chain.zonal_stats(geojson, stats=["mean", "std", "min", "max", "count", "sum"], band=1, verbose=False)`
+### `Chain.zonal_stats(geojson_str="", stats=["mean", "std", "min", "max", "count", "sum"], band=1, verbose=False)`
 
-Compute per-polygon zonal statistics over any raster. Terminal operation — returns results immediately.
+Compute per-polygon zonal statistics over any raster. Terminal operation — returns results immediately. All preceding pipeline operations (algebra, clip, terrain, etc.) are applied before statistics are computed.
 
 ```python
 import json, curaster
 
-aoi = json.dumps({
-    "type": "MultiPolygon",
-    "coordinates": [...]
+zones = json.dumps({
+    "type": "FeatureCollection",
+    "features": [
+        {"type": "Feature", "geometry": {"type": "Polygon", "coordinates": [[[13.3, 52.4], [13.5, 52.4], [13.5, 52.6], [13.3, 52.6], [13.3, 52.4]]]}},
+        {"type": "Feature", "geometry": {"type": "Polygon", "coordinates": [[[14.0, 52.0], [14.5, 52.0], [14.5, 52.5], [14.0, 52.5], [14.0, 52.0]]]}}
+    ]
 })
 
-results = curaster.open("ndvi.tif").zonal_stats(aoi, stats=["mean", "std", "min", "max"])
+# Zonal stats on raw raster
+results = curaster.open("ndvi.tif").zonal_stats(geojson_str=zones, stats=["mean", "std", "min", "max"])
 for r in results:
     print(r.zone_id, r.mean, r.std_dev, r.min, r.max)
+
+# Attribute access
+print(r.count, r.sum)
+
+# Convert to dict
+d = r.to_dict()
+# {'zone_id': 1, 'mean': 0.42, 'min': 0.01, 'max': 0.89, 'std_dev': 0.12, 'count': 4096, 'sum': 1720.3}
+
+# Zonal stats after algebra (operates on the computed output)
+results = (curaster.open("sentinel2.tif")
+    .algebra("(B8 - B4) / (B8 + B4)")
+    .zonal_stats(geojson_str=zones, stats=["mean", "min", "max"]))
+
+# Whole-image stats (no geojson)
+results = curaster.open("dem.tif").zonal_stats(stats=["mean", "min", "max"])
+print(results[0].mean)
 ```
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `geojson` | `str` | required | GeoJSON `Polygon` or `MultiPolygon` string |
+| `geojson_str` | `str` | `""` | GeoJSON `FeatureCollection`, `Polygon`, or `MultiPolygon` string (empty = whole-image stats as a single zone) |
 | `stats` | `list[str]` | all | Any subset of `mean`, `std`, `min`, `max`, `count`, `sum` |
-| `band` | `int` | `1` | Band number to compute statistics for (1-indexed) |
+| `band` | `int` | `1` | 1-indexed band to compute statistics for |
 | `verbose` | `bool` | `False` | Print progress |
 
-**Returns** `list[ZoneResult]` where each has `.zone_id`, `.count`, `.mean`, `.std_dev`, `.min_val`, `.max_val`, `.sum`
+**Returns** `list[ZoneResult]`
+
+#### `ZoneResult`
+
+| Attribute / Method | Type | Description |
+|---|---|---|
+| `.zone_id` | `int` | 1-based zone index (order of features in the GeoJSON) |
+| `.mean` | `float` | Mean pixel value |
+| `.min` | `float` | Minimum pixel value |
+| `.max` | `float` | Maximum pixel value |
+| `.std_dev` | `float` | Standard deviation |
+| `.count` | `int` | Number of valid pixels in the zone |
+| `.sum` | `float` | Sum of pixel values |
+| `.to_dict()` | `dict` | All of the above as a Python dict |
 
 ---
 
@@ -589,15 +892,50 @@ stack.temporal("diff") \
 
 | `temporal()` parameter | Type | Default | Description |
 |---|---|---|---|
-| `op` | `str` | required | `diff`, `ratio`, `anomaly_mean`, `anomaly_baseline`, `trend`, `mean`, `std`, `min`, `max` |
+| `op` | `str` | required | `diff`, `ratio`, `anomaly_mean`, `trend`, `mean`, `std`, `min`, `max` |
 | `t0` | `int` | `0` | Index of the first scene (for `diff`, `ratio`) |
 | `t1` | `int` | `-1` | Index of the second scene (-1 = last) |
 | `baseline` | `str` | `"mean"` | Baseline method for anomaly operations |
 | `time_values` | `list[float]` | `[]` | Timestamps for `trend` (defaults to 0, 1, 2, …) |
 
-**`StackChain.temporal()` Returns** a `Chain` (can chain `algebra`, `clip`, `save_local`, etc.)
+**`StackChain.temporal()` Returns** a `Chain` (can chain `algebra`, `clip`, `reproject`, `save_local`, etc.)
 
 All scenes in the stack must have the same width, height, and CRS. Use `.reproject()` on each `Chain` before stacking if misaligned.
+
+---
+
+#### `StackChain.algebra()`
+
+Apply a band-math expression across all bands of the stack simultaneously. Bands are indexed by their physical position across all stacked scenes.
+
+```python
+stack = curaster.open_stack(["b1.tif", "b2.tif"])
+# B1 = band 1 of scene 0, B2 = band 1 of scene 1, etc.
+stack.algebra("(B2 - B1) / (B2 + B1)").save_local("ratio.tif")
+```
+
+Same syntax as `Chain.algebra()` — see [Chain.algebra()](#chainalgebra).
+
+---
+
+#### `StackChain.reproject()`
+
+Reproject the entire stack before reduction. Accepts the same parameters as `Chain.reproject()` except `te_*` extent clipping is not supported.
+
+```python
+stack = curaster.open_stack(["utm32_a.tif", "utm32_b.tif"])
+stack.reproject("EPSG:4326", res_x=0.0001, res_y=0.0001) \
+     .temporal("mean") \
+     .save_local("mean_wgs84.tif")
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `target_crs` | `str` | required | Target CRS (EPSG code, WKT, PROJ string) |
+| `res_x` | `float` | `0` | Output pixel width in target CRS units |
+| `res_y` | `float` | `0` | Output pixel height in target CRS units |
+| `resampling` | `str` | `"bilinear"` | `"bilinear"` or `"nearest"` |
+| `nodata` | `float` | `-9999.0` | Fill value for pixels outside the source extent |
 
 ---
 
@@ -653,7 +991,7 @@ These tests read data dynamically over the network from an AWS S3 bucket using G
 
 ---
 
-
+## Building from Source
 
 ```bash
 # 1. Install Python build dependencies

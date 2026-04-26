@@ -135,8 +135,13 @@ void run_engine_zonal(const std::string& input_file, PipelineCtx& ctx, bool verb
     int  num_zones = static_cast<int>(prebuilt_zones.size());
     if (num_zones == 0) return;
 
-    int band_idx = std::max(1, ctx.zonal_params.band) - 1;
-    band_idx = std::min(band_idx, src_info.samples_per_pixel - 1);
+    int band_idx = ctx.zonal_params.band - 1;
+    if (band_idx < 0 || band_idx >= src_info.samples_per_pixel) {
+        throw std::runtime_error(
+            "zonal_stats: band " + std::to_string(ctx.zonal_params.band) +
+            " is out of range (file has " +
+            std::to_string(src_info.samples_per_pixel) + " band(s))");
+    }
 
     zonal_ensure_pool(num_zones, chunk_height, width);
 

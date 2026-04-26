@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <omp.h>
+#include "../../include/vram_cache.h"
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
@@ -178,7 +179,8 @@ void run_engine_ex(const std::string &input_file, PipelineCtx &ctx,
   }
 
   DatasetPool dataset_pool(num_threads, num_bands);
-  if (!is_s3) {
+  // Skip GDALOpen when the raster is already decoded in VRAM.
+  if (!is_s3 && !ctx.vram_cache) {
     for (int thread_idx = 0; thread_idx < num_threads; ++thread_idx) {
       dataset_pool.datasets[thread_idx] =
           static_cast<GDALDataset *>(GDALOpen(input_file.c_str(), GA_ReadOnly));
@@ -211,6 +213,13 @@ void run_engine_ex(const std::string &input_file, PipelineCtx &ctx,
     gdal_band_nums[b] = band_slots[b] + 1;
   }
 
+  const bool is_passthrough = ctx.instructions.empty();
+  std::vector<std::vector<float>> compact_bufs;
+  if (is_passthrough && num_bands > 1 && (ctx.result_callback || ctx.queue_callback)) {
+    compact_bufs.resize(num_threads,
+        std::vector<float>((size_t)num_bands * chunk_height * file_info.width));
+  }
+
   std::atomic<int> completed_chunks{0};
   double progress_state = -1.0;
   if (verbose) {
@@ -225,7 +234,29 @@ void run_engine_ex(const std::string &input_file, PipelineCtx &ctx,
     size_t num_pixels = static_cast<size_t>(file_info.width) * cur_height;
     ThreadBufs &buf = thread_pool[thread_id];
 
-    if (!is_s3) {
+    if (ctx.vram_cache) {
+      if (is_passthrough) {
+        for (int b = 0; b < num_bands; ++b) {
+          CUDA_CHECK(cudaMemcpyAsync(
+              buf.h_bands[b],
+              ctx.vram_cache->d_bands[band_slots[b]] +
+                  static_cast<size_t>(chunk_y0) * file_info.width,
+              static_cast<size_t>(file_info.width) * cur_height * sizeof(float),
+              cudaMemcpyDeviceToHost, buf.cuda_stream));
+        }
+        CUDA_CHECK(cudaStreamSynchronize(buf.cuda_stream));
+      } else {
+        float* cache_ptrs[64];
+        for (int b = 0; b < num_bands; ++b) {
+          cache_ptrs[b] =
+              ctx.vram_cache->d_bands[band_slots[b]] +
+              static_cast<size_t>(chunk_y0) * file_info.width;
+        }
+        CUDA_CHECK(cudaMemcpy(buf.d_band_ptrs, cache_ptrs,
+                              static_cast<size_t>(num_bands) * sizeof(float*),
+                              cudaMemcpyHostToDevice));
+      }
+    } else if (!is_s3) {
       dataset_pool.datasets[thread_id]->AdviseRead(
           0, chunk_y0, file_info.width, cur_height, file_info.width, cur_height,
           GDT_Float32, num_bands, nullptr, nullptr);
@@ -415,31 +446,73 @@ void run_engine_ex(const std::string &input_file, PipelineCtx &ctx,
       }
     }
 
-    launch_raster_algebra(d_instructions,
-                          static_cast<int>(ctx.instructions.size()),
-                          const_cast<const float *const *>(buf.d_band_ptrs),
-                          buf.d_output, num_pixels, buf.cuda_stream);
-
-    if (ctx.has_clip_mask && buf.d_clip_spans) {
-      launch_apply_mask(buf.d_output, num_pixels, file_info.width,
-                        buf.d_clip_spans, buf.cuda_stream);
-    }
-
-    CUDA_CHECK(cudaStreamSynchronize(buf.cuda_stream));
-
-    if (ctx.output_band) {
-#pragma omp critical(gdal_write)
-      {
-        ctx.output_band->RasterIO(GF_Write, 0, chunk_y0, file_info.width,
-                                  cur_height, buf.h_output, file_info.width,
-                                  cur_height, GDT_Float32, 0, 0);
+    if (is_passthrough) {
+      if (ctx.has_clip_mask && buf.d_clip_spans) {
+        for (int b = 0; b < num_bands; ++b) {
+          launch_apply_mask(buf.d_bands[b], num_pixels, file_info.width,
+                            buf.d_clip_spans, buf.cuda_stream);
+        }
+        CUDA_CHECK(cudaStreamSynchronize(buf.cuda_stream));
       }
-    }
-    if (ctx.queue_callback) {
-      ctx.queue_callback(file_info.width, cur_height, buf.h_output, chunk_y0);
-    }
-    if (ctx.result_callback) {
-      ctx.result_callback(file_info.width, cur_height, buf.h_output, chunk_y0);
+      if (ctx.output_dataset) {
+        auto* ds = static_cast<GDALDataset*>(ctx.output_dataset);
+#pragma omp critical(gdal_write)
+        {
+          for (int b = 0; b < num_bands; ++b) {
+            ds->GetRasterBand(b + 1)->RasterIO(GF_Write, 0, chunk_y0,
+                file_info.width, cur_height, buf.h_bands[b],
+                file_info.width, cur_height, GDT_Float32, 0, 0);
+          }
+        }
+      } else if (ctx.output_band) {
+#pragma omp critical(gdal_write)
+        {
+          ctx.output_band->RasterIO(GF_Write, 0, chunk_y0, file_info.width,
+              cur_height, buf.h_bands[0], file_info.width, cur_height, GDT_Float32, 0, 0);
+        }
+      }
+      if (ctx.result_callback || ctx.queue_callback) {
+        float* cbuf;
+        if (!compact_bufs.empty()) {
+          cbuf = compact_bufs[thread_id].data();
+          for (int b = 0; b < num_bands; ++b) {
+            memcpy(cbuf + static_cast<size_t>(b) * file_info.width * cur_height,
+                   buf.h_bands[b],
+                   static_cast<size_t>(file_info.width) * cur_height * sizeof(float));
+          }
+        } else {
+          cbuf = buf.h_bands[0];
+        }
+        if (ctx.result_callback) ctx.result_callback(file_info.width, cur_height, cbuf, chunk_y0);
+        if (ctx.queue_callback)  ctx.queue_callback (file_info.width, cur_height, cbuf, chunk_y0);
+      }
+    } else {
+      launch_raster_algebra(d_instructions,
+                            static_cast<int>(ctx.instructions.size()),
+                            const_cast<const float *const *>(buf.d_band_ptrs),
+                            buf.d_output, num_pixels, buf.cuda_stream);
+
+      if (ctx.has_clip_mask && buf.d_clip_spans) {
+        launch_apply_mask(buf.d_output, num_pixels, file_info.width,
+                          buf.d_clip_spans, buf.cuda_stream);
+      }
+
+      CUDA_CHECK(cudaStreamSynchronize(buf.cuda_stream));
+
+      if (ctx.output_band) {
+#pragma omp critical(gdal_write)
+        {
+          ctx.output_band->RasterIO(GF_Write, 0, chunk_y0, file_info.width,
+                                    cur_height, buf.h_output, file_info.width,
+                                    cur_height, GDT_Float32, 0, 0);
+        }
+      }
+      if (ctx.queue_callback) {
+        ctx.queue_callback(file_info.width, cur_height, buf.h_output, chunk_y0);
+      }
+      if (ctx.result_callback) {
+        ctx.result_callback(file_info.width, cur_height, buf.h_output, chunk_y0);
+      }
     }
 
     if (verbose) {
