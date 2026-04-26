@@ -163,7 +163,11 @@ void run_engine_ex(const std::string &input_file, PipelineCtx &ctx,
   size_t bufs_per_thread =
       band_bytes * num_bands + band_bytes +
       (ctx.has_clip_mask ? chunk_height * sizeof(GpuSpanRow) : 0);
-  size_t total_arena_bytes = bufs_per_thread * num_threads;
+  // alloc_from_arena makes 2-3 sub-allocations per thread each aligned to 256 bytes;
+  // reserve that padding so PinnedArena::alloc never overflows by a few hundred bytes.
+  const int allocs_per_thread = ctx.has_clip_mask ? 3 : 2;
+  const size_t align_slack = static_cast<size_t>(allocs_per_thread) * 256 * num_threads;
+  size_t total_arena_bytes = bufs_per_thread * num_threads + align_slack;
   g_pinned_arena.ensure(total_arena_bytes);
   g_pinned_arena.reset();
 
