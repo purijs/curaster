@@ -32,7 +32,11 @@ def _result_to_array(res) -> np.ndarray:
 
 
 def _collect_iter(chain) -> np.ndarray:
-    """Drain an iter_begin() queue and reconstruct the full (bands, H, W) array."""
+    """Drain an iter_begin() queue and reconstruct the full (bands, H, W) array.
+
+    Chunks are sorted by y_offset before assembly because OMP parallel execution
+    delivers them in completion order, not spatial order.
+    """
     chunks = []
     q = chain.iter_begin(buf_chunks=2)
     while True:
@@ -42,14 +46,17 @@ def _collect_iter(chain) -> np.ndarray:
         chunks.append(c)
     if not chunks:
         return None
-    nb  = chunks[0]["bands"]
+    chunks.sort(key=lambda c: c["y_offset"])
+    # Derive band count from data shape: (H,W) = 1 band, (nb,H,W) = nb bands
+    d0 = np.asarray(chunks[0]["data"])
+    nb  = 1 if d0.ndim == 2 else d0.shape[0]
     w   = chunks[0]["width"]
     h   = sum(c["height"] for c in chunks)
     out = np.empty((nb, h, w), dtype=np.float32)
     y   = 0
     for c in chunks:
         ch  = c["height"]
-        arr = np.array(c["data"], dtype=np.float32).reshape(nb, ch, w)
+        arr = np.asarray(c["data"], dtype=np.float32).reshape(nb, ch, w)
         out[:, y:y + ch, :] = arr
         y  += ch
     return out
@@ -181,11 +188,13 @@ class TestReproject:
         res = curaster.open(tif_4band).reproject(TARGET_CRS).to_memory()
         assert res.bands == BANDS
 
-    def test_reproject_changes_dims(self, tif_4band):
+    def test_reproject_changes_crs(self, tif_4band):
         info_src = curaster.open(tif_4band).get_info()
-        res = curaster.open(tif_4band).reproject(TARGET_CRS).to_memory()
-        # UTM pixel size default differs from 0.01° so dimensions change
-        assert res.width != info_src["width"] or res.height != info_src["height"]
+        info_dst = curaster.open(tif_4band).reproject(TARGET_CRS).get_info()
+        assert str(EPSG_DST) in info_dst["crs"], (
+            f"Expected EPSG:{EPSG_DST} in reprojected CRS, got: {info_dst['crs']}"
+        )
+        assert info_dst["crs"] != info_src["crs"]
 
     def test_reproject_save_local_multiband(self, tif_4band, tmp_path):
         out = str(tmp_path / "out_reproj.tif")

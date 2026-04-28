@@ -592,11 +592,12 @@ void Chain::execute(GDALRasterBand*             output_band,
     std::vector<ChainOp> post_ops(operations_.begin() + last_nbhd + 1, operations_.end());
 
     std::string effective_input = input_file_;
-    std::string pre_vsimem, focal_vsimem;
+    std::string pre_vsimem, focal_vsimem, post_pre_vsimem;
 
     auto do_cleanup = [&]() {
-        if (!pre_vsimem.empty())   { VSIUnlink(pre_vsimem.c_str());   pre_vsimem.clear(); }
-        if (!focal_vsimem.empty()) { VSIUnlink(focal_vsimem.c_str()); focal_vsimem.clear(); }
+        if (!pre_vsimem.empty())      { VSIUnlink(pre_vsimem.c_str());      pre_vsimem.clear(); }
+        if (!focal_vsimem.empty())    { VSIUnlink(focal_vsimem.c_str());    focal_vsimem.clear(); }
+        if (!post_pre_vsimem.empty()) { VSIUnlink(post_pre_vsimem.c_str()); post_pre_vsimem.clear(); }
     };
 
     try {
@@ -662,12 +663,39 @@ void Chain::execute(GDALRasterBand*             output_band,
 
             if (!post_ops.empty()) {
                 FileInfo post_src = get_file_info(focal_vsimem);
-                PipelineCtx post_ctx = build_pipeline_context(post_ops, post_src, focal_vsimem);
+                std::string cur_post_input = focal_vsimem;
+
+                int post_rep_idx = -1;
+                for (int i = 0; i < (int)post_ops.size(); ++i)
+                    if (post_ops[i].type == ChainOpType::REPROJECT) { post_rep_idx = i; break; }
+
+                if (post_rep_idx > 0) {
+                    std::vector<ChainOp> pre_rep_ops(post_ops.begin(), post_ops.begin() + post_rep_idx);
+                    PipelineCtx pre_rep_ctx = build_pipeline_context(pre_rep_ops, post_src, cur_post_input);
+                    int pre_rep_bands = pre_rep_ctx.instructions.empty() ? N : 1;
+
+                    post_pre_vsimem = "/vsimem/curaster_post_pre_"
+                        + std::to_string(getpid()) + "_"
+                        + std::to_string(++vsimem_counter) + ".tif";
+                    GDALDataset* pre_rep_ds = create_output_dataset(post_pre_vsimem, post_src, pre_rep_bands);
+                    if (pre_rep_bands == 1)
+                        pre_rep_ctx.output_band    = pre_rep_ds->GetRasterBand(1);
+                    else
+                        pre_rep_ctx.output_dataset = static_cast<void*>(pre_rep_ds);
+                    run_engine_ex(cur_post_input, pre_rep_ctx, false);
+                    GDALClose(pre_rep_ds);
+
+                    cur_post_input = post_pre_vsimem;
+                    post_src = get_file_info(cur_post_input);
+                    post_ops = std::vector<ChainOp>(post_ops.begin() + post_rep_idx, post_ops.end());
+                }
+
+                PipelineCtx post_ctx = build_pipeline_context(post_ops, post_src, cur_post_input);
                 // post_ctx.instructions non-empty only if post_ops contain ALGEBRA → 1 band out;
                 // otherwise it's passthrough/clip/reproject and all N bands flow through.
                 int post_out = post_ctx.instructions.empty() ? N : 1;
                 attach_output_callbacks(post_ctx, output_band, result, chunk_queue, post_out);
-                run_engine_ex(focal_vsimem, post_ctx, verbose);
+                run_engine_ex(cur_post_input, post_ctx, verbose);
             } else {
                 FileInfo fvs = get_file_info(focal_vsimem);
                 PipelineCtx out_ctx = build_pipeline_context({}, fvs, focal_vsimem);
@@ -1224,7 +1252,7 @@ std::shared_ptr<RasterResult> Chain::to_memory(bool verbose) {
     if (!tmp_ctx.has_focal && !tmp_ctx.has_terrain && !tmp_ctx.has_texture) {
         num_out_bands = tmp_ctx.instructions.empty() ? (int)tmp_ctx.band_map.size() : 1;
     } else if (tmp_ctx.has_focal && !tmp_ctx.has_terrain && !tmp_ctx.has_texture) {
-        num_out_bands = (int)tmp_ctx.band_map.size();
+        num_out_bands = tmp_ctx.instructions.empty() ? (int)tmp_ctx.band_map.size() : 1;
     } else {
         num_out_bands = tmp_ctx.focal_num_output_bands > 0 ? tmp_ctx.focal_num_output_bands : 1;
     }
